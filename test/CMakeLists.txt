@@ -371,6 +371,8 @@ add_sdl_test_executable(testgpu_fences NONINTERACTIVE SOURCES testgpu_fences.c N
 if(EMSCRIPTEN AND SDL_WEBGPU)
     add_sdl_test_executable(testgpu_webgpu NONINTERACTIVE SOURCES testgpu_webgpu.c NAME83 gpuweb)
     target_link_options(testgpu_webgpu PRIVATE -sASYNCIFY -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=4)
+    add_sdl_test_executable(testgpu_webgpu_window SOURCES testgpu_webgpu_window.c NAME83 gpuwin)
+    target_link_options(testgpu_webgpu_window PRIVATE -sASYNCIFY -sPROXY_TO_PTHREAD -sPTHREAD_POOL_SIZE=4 -sOFFSCREENCANVAS_SUPPORT "-sOFFSCREENCANVASES_TO_PTHREAD=#canvas")
 endif()
 add_sdl_test_executable(testatomic NONINTERACTIVE DISABLE_THREADS_ARGS "--no-threads" SOURCES testatomic.c NAME83 atomic)
 add_sdl_test_executable(testintersections SOURCES testintersections.c NAME83 intersec)
