@@ -33,3 +33,16 @@ slices; the browser test failed with 0/16 expected pixels before that repair.
 These checks passed in headless Chromium through WebLua on Linux with
 Emscripten 4.0.16. They establish synthetic submission/readback and fence policy,
 not complete renderer, shader, presentation, thread-safety, or game conformance.
+
+The `testgpu_webgpu_window` browser probe creates and claims an SDL window,
+submits a blue swapchain clear, then retains the presentation until Escape or
+window close releases the resources. Its worker requires
+`-sOFFSCREENCANVAS_SUPPORT -sOFFSCREENCANVASES_TO_PTHREAD=#canvas` in addition to
+Asyncify/pthread flags. Without canvas transfer the browser worker cannot find
+the canvas for WebGPU context creation.
+
+A real blue canvas was observed through WebLua with Chromium under an isolated
+Xvfb display. The same Linux headless Chromium run submitted successfully but
+its screenshot omitted both this canvas and an independent raw WebGPU canvas;
+headless screenshot color alone is therefore not a trusted GPU discriminator.
+Texture readback remains independently checked by `testgpu_webgpu`.
