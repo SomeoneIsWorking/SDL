@@ -5285,6 +5285,9 @@ static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
         return false;
     }
 
+    // Completion callbacks cover only work submitted before registration.
+    wgpuQueueSubmit(wrapper->queue, 1, &cmdBuf);
+
     if (wrapper->renderer->queueDoneFence != NULL) {
         // Reregister the fence
         WEBGPU_INTERNAL_ReregisterFence(wrapper->queue, wrapper->renderer->queueDoneFence);
@@ -5299,8 +5302,6 @@ static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
     WEBGPU_INTERNAL_InsertElementIntoArray(wrapper->renderer->submittedCommandBuffers, wrapper->renderer->submittedCommandBufferCapacity,
                                            wrapper->renderer->submittedCommandBufferCount, WebGPUSubmittedCommandBuffer *, submitted);
-
-    wgpuQueueSubmit(wrapper->queue, 1, &cmdBuf);
 
     if (isMainThread) {
 #ifndef __EMSCRIPTEN__
@@ -5335,9 +5336,13 @@ static bool WEBGPU_Submit(SDL_GPUCommandBuffer *commandBuffer)
 
 static SDL_GPUFence *WEBGPU_SubmitAndAcquireFence(SDL_GPUCommandBuffer *commandBuffer)
 {
-    WEBGPU_Submit(commandBuffer);
+    // Submit releases the command buffer, but the device still owns its queue.
+    WGPUQueue queue = ((WebGPUCommandBuffer *)commandBuffer)->queue;
+    if (!WEBGPU_Submit(commandBuffer)) {
+        return NULL;
+    }
 
-    return (SDL_GPUFence *)WEBGPU_INTERNAL_CreateFence(((WebGPUCommandBuffer *)commandBuffer)->queue);
+    return (SDL_GPUFence *)WEBGPU_INTERNAL_CreateFence(queue);
 }
 
 static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
