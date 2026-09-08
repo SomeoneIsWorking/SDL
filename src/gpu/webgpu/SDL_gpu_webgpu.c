@@ -16,6 +16,8 @@
 
 #include "../SDL_sysgpu.h"
 #include "webgpu.h"
+#include "SDL_gpu_webgpu_fence.h"
+#include "SDL_gpu_webgpu_download.h"
 
 #define WINDOW_PROPERTY_DATA                           "SDL.internal.gpu.webgpu.data"
 #define DEFAULT_BINDGROUP_EXPIRY                       10000
@@ -1956,23 +1958,29 @@ static bool WEBGPU_QueryFence(SDL_GPURenderer *device, SDL_GPUFence *fence)
     return WEBGPU_INTERNAL_QueryFence((WebGPURenderer *)device, (WebGPUFence *)fence);
 }
 
+typedef struct WebGPUFenceWaitContext
+{
+    WebGPURenderer *renderer;
+    WebGPUFence *const *fences;
+} WebGPUFenceWaitContext;
+
+static bool WEBGPU_INTERNAL_QueryFenceAtIndex(void *context, Uint32 index)
+{
+    WebGPUFenceWaitContext *wait = context;
+    return WEBGPU_INTERNAL_QueryFence(wait->renderer, wait->fences[index]);
+}
+
+static void WEBGPU_INTERNAL_YieldFenceWait(void *context)
+{
+    (void)context;
+    SDL_DelayNS(100);
+}
+
 static bool WEBGPU_INTERNAL_WaitForFences(WebGPURenderer *renderer, bool waitAll, WebGPUFence *const *fences, Uint32 num_fences)
 {
-    Uint32 triggeredFenceCount = 0;
-    Uint32 triggeredFenceThreshold = waitAll ? num_fences : 1;
-
-    while (triggeredFenceCount < triggeredFenceThreshold) {
-        for (int i = 0; i < num_fences; i++) {
-            if (WEBGPU_INTERNAL_QueryFence(renderer, fences[i])) {
-                triggeredFenceCount++;
-            }
-
-            // Spin to appease Emscripten.
-            SDL_DelayNS(100);
-        }
-    }
-
-    // TODO: Timeout functionality?
+    WebGPUFenceWaitContext context = { renderer, fences };
+    WEBGPU_WaitForFenceSet(&context, waitAll, num_fences,
+                           WEBGPU_INTERNAL_QueryFenceAtIndex, WEBGPU_INTERNAL_YieldFenceWait);
     return true;
 }
 
@@ -5393,32 +5401,17 @@ static void WEBGPU_ReleaseWindow(SDL_GPURenderer *driverData, SDL_Window *window
 
 static void WEBGPU_DownloadFromTexture(SDL_GPUCommandBuffer *commandBuffer, const SDL_GPUTextureRegion *source, const SDL_GPUTextureTransferInfo *destination)
 {
-    WGPUTexelCopyTextureInfo sourceInfo;
-    WGPUTexelCopyBufferInfo destinationInfo;
-
-    Uint32 unpaddedBPR = BytesPerRow(source->w, ((WebGPUTextureContainer *)source->texture)->header.info.format);
-    Uint32 paddedBPR = ALIGN_VALUE(unpaddedBPR, 256);
-
-    sourceInfo.aspect = WGPUTextureAspect_All;
-    sourceInfo.texture = ((WebGPUTextureContainer *)source->texture)->activeTexture->texture;
-    sourceInfo.mipLevel = 0;
-    sourceInfo.origin = (WGPUOrigin3D){ .x = source->x, .y = source->y, .z = source->z };
-
-    destinationInfo.buffer = ((WebGPUBufferContainer *)destination->transfer_buffer)->activeBuffer->buffer;
-    destinationInfo.layout = (WGPUTexelCopyBufferLayout){
-        .bytesPerRow = paddedBPR,
-        .offset = destination->offset,
-        .rowsPerImage = source->h,
-    };
-
-    Uint32 blockWidth = Texture_GetBlockWidth(((WebGPUTextureContainer *)source->texture)->activeTexture->format);
-    Uint32 blockHeight = Texture_GetBlockHeight(((WebGPUTextureContainer *)source->texture)->activeTexture->format);
-
-    wgpuCommandEncoderCopyTextureToBuffer(((WebGPUCommandBuffer *)commandBuffer)->encoder, &sourceInfo, &destinationInfo, &(WGPUExtent3D){
-                                                                                                                              ALIGN_VALUE(source->w, blockWidth),
-                                                                                                                              ALIGN_VALUE(source->h, blockHeight),
-                                                                                                                              source->layer,
-                                                                                                                          });
+    WebGPUCommandBuffer *command = (WebGPUCommandBuffer *)commandBuffer;
+    WebGPUTextureContainer *texture = (WebGPUTextureContainer *)source->texture;
+    WebGPUBufferContainer *buffer = (WebGPUBufferContainer *)destination->transfer_buffer;
+    SDL_AtomicIncRef(&texture->activeTexture->referenceCount);
+    SDL_AtomicIncRef(&buffer->activeBuffer->referenceCount);
+    WEBGPU_INTERNAL_InsertElementIntoArray(command->submitted.usedTextures, command->submitted.usedTextureCapacity,
+                                           command->submitted.usedTextureCount, WebGPUTexture *, texture->activeTexture);
+    WEBGPU_INTERNAL_InsertElementIntoArray(command->submitted.usedBuffers, command->submitted.usedBufferCapacity,
+                                           command->submitted.usedBufferCount, WebGPUBuffer *, buffer->activeBuffer);
+    WEBGPU_DownloadTextureRegion(command->encoder, texture->activeTexture->texture, buffer->activeBuffer->buffer,
+                                 texture->header.info.type, texture->header.info.format, source, destination);
 }
 
 static void WEBGPU_Blit(SDL_GPUCommandBuffer *commandBuffer, const SDL_GPUBlitInfo *info)
