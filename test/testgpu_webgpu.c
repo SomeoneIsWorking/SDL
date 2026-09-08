@@ -1,7 +1,28 @@
 /* Offscreen WebGPU submission/readback contract, with no game data. */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <emscripten.h>
 #include <stdio.h>
+
+EM_JS(void, instrument_queue_submission, (), {
+    const submit = GPUQueue.prototype.submit;
+    const fence = GPUQueue.prototype.onSubmittedWorkDone;
+    globalThis.queueSubmissionEvents = [];
+    GPUQueue.prototype.submit = function(... args)
+    {
+        queueSubmissionEvents.push("submit");
+        return submit.apply(this, args);
+    };
+    GPUQueue.prototype.onSubmittedWorkDone = function(... args)
+    {
+        queueSubmissionEvents.push("fence");
+        return fence.apply(this, args);
+    };
+});
+EM_JS(void, begin_submission_check, (), { queueSubmissionEvents = []; });
+EM_JS(int, submitted_before_fences, (), {
+    return queueSubmissionEvents.indexOf("submit") == 0 && queueSubmissionEvents.includes("fence");
+});
 
 static int check_download(SDL_GPUTextureType type, Uint32 layer, Uint32 mip, Uint32 pitch)
 {
@@ -73,7 +94,12 @@ static int check_download(SDL_GPUTextureType type, Uint32 layer, Uint32 mip, Uin
     destination.rows_per_layer = 4;
     SDL_DownloadFromGPUTexture(copy, &region, &destination);
     SDL_EndGPUCopyPass(copy);
+    begin_submission_check();
     fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    if (!submitted_before_fences()) {
+        puts("WebGPU queue ordering FAILED: completion fence registered before current submission");
+        goto cleanup;
+    }
     if (!fence || !SDL_WaitForGPUFences(device, true, &fence, 1)) {
         goto cleanup;
     }
@@ -116,6 +142,7 @@ int main(int argc, char **argv)
     int failures = 0;
     (void)argc;
     (void)argv;
+    instrument_queue_submission();
     failures += check_download(SDL_GPU_TEXTURETYPE_2D, 0, 0, 64);
     failures += check_download(SDL_GPU_TEXTURETYPE_2D, 0, 0, 0);
     failures += check_download(SDL_GPU_TEXTURETYPE_2D_ARRAY, 1, 1, 64);
