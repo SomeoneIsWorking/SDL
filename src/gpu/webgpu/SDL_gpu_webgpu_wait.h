@@ -21,6 +21,18 @@
  * saying so is the only way the caller can tell anyone. */
 #define SDL_WEBGPU_WAIT_TIMEOUT_NS (10 * SDL_NS_PER_SECOND)
 
+/* How many futures one timed WaitAny may cover. This backend waits on one at a
+ * time, but the instance limit is declared once at creation and cannot be
+ * raised later, so it is set to the implementation's own default rather than
+ * to the single future in use today. */
+#define WEBGPU_TIMED_WAIT_ANY_MAX_COUNT 64
+
+/* The longest one pass of a fence wait may block before the caller re-checks
+ * its own deadline. It is not how long a fence takes: a timed WaitAny returns
+ * the moment the future completes, so this only bounds how late the enclosing
+ * timeout can be noticed. */
+#define WEBGPU_FENCE_WAIT_SLICE_NS (SDL_NS_PER_SECOND / 2)
+
 /* Query every fence in the same pass: completed fences must not be counted
  * repeatedly toward wait_all while another fence remains pending. Yield lets
  * the host deliver asynchronous completion callbacks between passes.
