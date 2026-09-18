@@ -857,6 +857,11 @@ typedef struct WebGPURenderer
     Uint64 createdByThreadID;
     Uint64 numSubmissions;
 
+    // Whether this instance was created with TimedWaitAny, which decides
+    // whether a wait can block at all or can only poll. See the instance
+    // creation in WEBGPU_CreateDevice.
+    bool timedWaitAny;
+
     Uint32 maxFramesInFlight;
     Uint32 blitPipelineCount;
     Uint32 blitPipelineCapacity;
@@ -1981,6 +1986,7 @@ typedef struct WebGPUFenceWaitContext
 {
     WebGPURenderer *renderer;
     WebGPUFence *const *fences;
+    Uint32 count;
 } WebGPUFenceWaitContext;
 
 static bool WEBGPU_INTERNAL_QueryFenceAtIndex(void *context, Uint32 index)
@@ -1989,15 +1995,43 @@ static bool WEBGPU_INTERNAL_QueryFenceAtIndex(void *context, Uint32 index)
     return WEBGPU_INTERNAL_QueryFence(wait->renderer, wait->fences[index]);
 }
 
+/* Hand the browser the thread, rather than take it away from it.
+ *
+ * A zero-timeout WaitAny cannot resolve anything: it inspects the event map
+ * and returns without reaching JavaScript, so the promise behind the future
+ * is exactly as unresolved afterwards as before. Polling it between sleeps --
+ * which is what this yield used to be -- is therefore not a slow wait, it is
+ * a wait that cannot succeed unless something else on this thread happens to
+ * return to the event loop first.
+ *
+ * A non-zero timeout is a different code path: it unwinds through Asyncify,
+ * the browser runs, the promise settles, and the call resumes. It returns as
+ * soon as the future completes, so the slice is only an upper bound on how
+ * long one pass may block before the caller's own deadline is re-checked.
+ *
+ * One future per pass, because the caller re-queries the whole set after each
+ * yield anyway and waiting on the first outstanding one is what unblocks it. */
 static void WEBGPU_INTERNAL_YieldFenceWait(void *context)
 {
-    (void)context;
-    SDL_DelayNS(100);
+    WebGPUFenceWaitContext *wait = context;
+
+    if (!wait->renderer->timedWaitAny) {
+        SDL_DelayNS(100);
+        return;
+    }
+    for (Uint32 i = 0; i < wait->count; ++i) {
+        if (wait->fences[i] == NULL || SDL_GetAtomicInt(&wait->fences[i]->status)) {
+            continue;
+        }
+        wgpuInstanceWaitAny(wait->renderer->instance, 1, &wait->fences[i]->future,
+                            WEBGPU_FENCE_WAIT_SLICE_NS);
+        return;
+    }
 }
 
 static bool WEBGPU_INTERNAL_WaitForFences(WebGPURenderer *renderer, bool waitAll, WebGPUFence *const *fences, Uint32 num_fences)
 {
-    WebGPUFenceWaitContext context = { renderer, fences };
+    WebGPUFenceWaitContext context = { renderer, fences, num_fences };
     Uint32 completed = 0;
 
     if (!WEBGPU_WaitForFenceSet(&context, waitAll, num_fences,
@@ -4762,7 +4796,19 @@ static bool WEBGPU_WaitAndAcquireSwapchainTexture(SDL_GPUCommandBuffer *command_
                                 renderer->submittedCommandBufferCount, renderer->maxFramesInFlight);
         }
         WEBGPU_INTERNAL_HandlePendingDestroys(renderer);
-        SDL_DelayNS(15);
+        if (renderer->submittedCommandBufferCount > 0) {
+            /* What frees a slot is the OLDEST submission completing, so wait
+               for that one rather than sleeping and asking again. Sleeping
+               cannot help here: the poll inside HandlePendingDestroys never
+               reaches the browser, so without this the loop would spend its
+               whole deadline discovering nothing. */
+            WebGPUFence *oldest = renderer->submittedCommandBuffers[0]->fence;
+            WebGPUFenceWaitContext wait = { renderer, &oldest, 1 };
+
+            WEBGPU_INTERNAL_YieldFenceWait(&wait);
+        } else {
+            SDL_DelayNS(15);
+        }
     }
 }
 
@@ -5444,6 +5490,12 @@ static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
                              renderer->submittedCommandBufferCount, renderer->queuedDestroyCount);
                 break;
             }
+            if (renderer->submittedCommandBufferCount > 0) {
+                WebGPUFence *oldest = renderer->submittedCommandBuffers[0]->fence;
+                WebGPUFenceWaitContext wait = { renderer, &oldest, 1 };
+
+                WEBGPU_INTERNAL_YieldFenceWait(&wait);
+            }
             WEBGPU_INTERNAL_HandlePendingDestroys(renderer);
         }
     }
@@ -6020,12 +6072,39 @@ static SDL_GPUDevice *WEBGPU_CreateDevice(bool debugMode, bool preferLowPower, S
         SDL_Log("Failed to copy properties! Oh no!\n%s", SDL_GetError());
     }
 
-// I do not like MSVC.
-#ifdef _MSC_VER
-    renderer->instance = wgpuCreateInstance(&(WGPUInstanceDescriptor)WGPU_INSTANCE_DESCRIPTOR_INIT);
-#else
-    renderer->instance = wgpuCreateInstance(&WGPU_INSTANCE_DESCRIPTOR_INIT);
-#endif
+    /* TimedWaitAny is what makes wgpuInstanceWaitAny able to WAIT. Without it
+       the only legal timeout is 0, and a zero timeout takes a path that walks
+       the event map under a mutex and returns -- it never reaches JavaScript,
+       so a future whose promise has not resolved yet cannot resolve during the
+       call. Polling one in a loop, which is what every wait in this backend
+       did, therefore cannot make progress on a thread that does not otherwise
+       return to its event loop. With the feature enabled, a non-zero timeout
+       goes through Asyncify instead: the stack unwinds, the browser runs, the
+       promise settles, and the call resumes with an answer. */
+    const WGPUInstanceFeatureName instanceFeatures[] = { WGPUInstanceFeatureName_TimedWaitAny };
+    WGPUInstanceLimits instanceLimits = WGPU_INSTANCE_LIMITS_INIT;
+    WGPUInstanceDescriptor instanceDesc = WGPU_INSTANCE_DESCRIPTOR_INIT;
+
+    instanceLimits.timedWaitAnyMaxCount = WEBGPU_TIMED_WAIT_ANY_MAX_COUNT;
+    instanceDesc.requiredFeatureCount = SDL_arraysize(instanceFeatures);
+    instanceDesc.requiredFeatures = instanceFeatures;
+    instanceDesc.requiredLimits = &instanceLimits;
+
+    renderer->instance = wgpuCreateInstance(&instanceDesc);
+    if (!renderer->instance) {
+        /* The feature is unavailable without Asyncify or JSPI. Fall back to a
+           plain instance so the backend still runs, and say so: every wait in
+           it then degenerates to the poll described above, which is a
+           performance and liveness cliff, not a detail. */
+        WGPUInstanceDescriptor plainDesc = WGPU_INSTANCE_DESCRIPTOR_INIT;
+
+        SDL_LogError(SDL_LOG_CATEGORY_GPU,
+                     "WebGPU: could not create an instance with TimedWaitAny; waits will poll "
+                     "futures that cannot resolve during the call and will run to their timeout.");
+        renderer->instance = wgpuCreateInstance(&plainDesc);
+    } else {
+        renderer->timedWaitAny = true;
+    }
 
     if (!renderer->instance) {
         SDL_free(renderer);
