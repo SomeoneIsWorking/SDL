@@ -16,7 +16,7 @@
 
 #include "../SDL_sysgpu.h"
 #include "webgpu.h"
-#include "SDL_gpu_webgpu_fence.h"
+#include "SDL_gpu_webgpu_wait.h"
 #include "SDL_gpu_webgpu_download.h"
 
 #define WINDOW_PROPERTY_DATA                           "SDL.internal.gpu.webgpu.data"
@@ -2008,7 +2008,7 @@ static bool WEBGPU_INTERNAL_WaitForFences(WebGPURenderer *renderer, bool waitAll
            this callback cannot be delivered to. "3 of 4" means the queue is
            alive and one submission is stuck. */
         return SDL_SetError("WebGPU: waited %d seconds for %s of %u fence(s); %u completed",
-                            (int)(SDL_WEBGPU_FENCE_WAIT_TIMEOUT_NS / SDL_NS_PER_SECOND),
+                            (int)(SDL_WEBGPU_WAIT_TIMEOUT_NS / SDL_NS_PER_SECOND),
                             waitAll ? "all" : "any", num_fences, completed);
     }
     return true;
@@ -4723,18 +4723,47 @@ static void WEBGPU_SetScissor(SDL_GPUCommandBuffer *commandBuffer, const SDL_Rec
     }
 }
 
+/* WEBGPU_AcquireSwapchainTexture reports two different things through one NULL
+ * texture, and the difference decides whether waiting can ever help:
+ *
+ *   returns true  + NULL -- every frame the renderer allows is still in
+ *                           flight. Waiting is correct: reaping a completed
+ *                           submission frees a slot.
+ *   returns false + NULL -- wgpuSurfaceGetCurrentTexture refused. Nothing
+ *                           about waiting changes that, and the error naming
+ *                           the cause is already set.
+ *
+ * This loop used to ignore the return value entirely and spin on the second
+ * case forever. Worse, it could not even yield there: the only thing in the
+ * body that hands the browser's event loop a turn is the fence poll inside
+ * HandlePendingDestroys, and that returns immediately when no command buffer
+ * has been submitted -- which is exactly the state on the first frame of a
+ * fresh renderer. Measured: a GPU self-test worker that claimed its swapchain,
+ * entered this loop, and from then on did not answer the inspector at all.
+ *
+ * So a refusal propagates on the spot, and the wait that can legitimately
+ * succeed is bounded and says what it was waiting for when it does not. */
 static bool WEBGPU_WaitAndAcquireSwapchainTexture(SDL_GPUCommandBuffer *command_buffer, SDL_Window *window, SDL_GPUTexture **swapchain_texture, Uint32 *swapchain_texture_width, Uint32 *swapchain_texture_height)
 {
-    bool result = WEBGPU_AcquireSwapchainTexture(command_buffer, window, swapchain_texture, swapchain_texture_width, swapchain_texture_height);
+    WebGPURenderer *renderer = ((WebGPUCommandBuffer *)command_buffer)->renderer;
+    const Uint64 deadline = SDL_GetTicksNS() + SDL_WEBGPU_WAIT_TIMEOUT_NS;
 
-    while (*swapchain_texture == NULL) {
-        WEBGPU_INTERNAL_HandlePendingDestroys(((WebGPUCommandBuffer *)command_buffer)->renderer);
+    for (;;) {
+        if (!WEBGPU_AcquireSwapchainTexture(command_buffer, window, swapchain_texture, swapchain_texture_width, swapchain_texture_height)) {
+            return false;
+        }
+        if (*swapchain_texture != NULL) {
+            return true;
+        }
+        if (SDL_GetTicksNS() >= deadline) {
+            return SDL_SetError("WebGPU: waited %d seconds for a swapchain texture; "
+                                "%u submitted frame(s) are still in flight and the renderer allows %u",
+                                (int)(SDL_WEBGPU_WAIT_TIMEOUT_NS / SDL_NS_PER_SECOND),
+                                renderer->submittedCommandBufferCount, renderer->maxFramesInFlight);
+        }
+        WEBGPU_INTERNAL_HandlePendingDestroys(renderer);
         SDL_DelayNS(15);
-
-        result = WEBGPU_AcquireSwapchainTexture(command_buffer, window, swapchain_texture, swapchain_texture_width, swapchain_texture_height);
     }
-
-    return result;
 }
 
 static void WEBGPU_ReleaseTexture(SDL_GPURenderer *renderer, SDL_GPUTexture *texture)
@@ -5397,8 +5426,26 @@ static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
 
     WEBGPU_INTERNAL_ReleaseBlitResources(renderer);
 
-    while (renderer->queuedDestroyCount > 0 || renderer->submittedCommandBufferCount > 0) {
-        WEBGPU_INTERNAL_HandlePendingDestroys(renderer);
+    /* Draining before teardown is correct, but it cannot be the last word: a
+       submission whose completion callback never arrives would hang the
+       destroy forever, and a self-test battery destroys a device after every
+       test. Bounded, and loud when it expires -- the device is going away
+       either way, so the browser reclaims what is still outstanding, and the
+       only thing worth preserving is that somebody is told. */
+    {
+        const Uint64 deadline = SDL_GetTicksNS() + SDL_WEBGPU_WAIT_TIMEOUT_NS;
+
+        while (renderer->queuedDestroyCount > 0 || renderer->submittedCommandBufferCount > 0) {
+            if (SDL_GetTicksNS() >= deadline) {
+                SDL_LogError(SDL_LOG_CATEGORY_GPU,
+                             "WebGPU: waited %d seconds to drain the device before destroying it; "
+                             "%u submitted frame(s) and %u queued destroy(s) never completed and are being abandoned.",
+                             (int)(SDL_WEBGPU_WAIT_TIMEOUT_NS / SDL_NS_PER_SECOND),
+                             renderer->submittedCommandBufferCount, renderer->queuedDestroyCount);
+                break;
+            }
+            WEBGPU_INTERNAL_HandlePendingDestroys(renderer);
+        }
     }
 
     // Destroying mutexes
