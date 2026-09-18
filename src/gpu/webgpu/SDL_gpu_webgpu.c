@@ -1421,9 +1421,13 @@ static void WEBGPU_INTERNAL_DeviceLostCallback(WGPUDevice const *device, WGPUDev
 {
     bool debugMode = ((WebGPURenderer *)renderer)->debugMode;
 
-    if (debugMode) {
-        SDL_LogError(SDL_LOG_CATEGORY_GPU, "Device has been lost.");
-    }
+    /* Device loss silences every future submission's fence (it never
+       resolves) with no further signal anywhere else, so this must be
+       reported regardless of debug mode -- xmen2 issue #152 measured a
+       selftest that printed its banner then produced NOTHING, on a build
+       where debugMode is off by default. */
+    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Device has been lost (reason=%d): %s",
+                 (int)reason, message.data ? message.data : "(no message)");
 
     if (((WebGPURenderer *)renderer)->shouldRecreateLostDevice && !((WebGPURenderer *)renderer)->destroyingSelf) {
         // Since the device has been lost, there might be some larger issues within WebGPU.
@@ -1994,8 +1998,19 @@ static void WEBGPU_INTERNAL_YieldFenceWait(void *context)
 static bool WEBGPU_INTERNAL_WaitForFences(WebGPURenderer *renderer, bool waitAll, WebGPUFence *const *fences, Uint32 num_fences)
 {
     WebGPUFenceWaitContext context = { renderer, fences };
-    WEBGPU_WaitForFenceSet(&context, waitAll, num_fences,
-                           WEBGPU_INTERNAL_QueryFenceAtIndex, WEBGPU_INTERNAL_YieldFenceWait);
+    Uint32 completed = 0;
+
+    if (!WEBGPU_WaitForFenceSet(&context, waitAll, num_fences,
+                                WEBGPU_INTERNAL_QueryFenceAtIndex, WEBGPU_INTERNAL_YieldFenceWait,
+                                &completed)) {
+        /* Say which of the two shapes this is. "0 of 1" means the queue never
+           reported the submission done at all -- a lost device, or a thread
+           this callback cannot be delivered to. "3 of 4" means the queue is
+           alive and one submission is stuck. */
+        return SDL_SetError("WebGPU: waited %d seconds for %s of %u fence(s); %u completed",
+                            (int)(SDL_WEBGPU_FENCE_WAIT_TIMEOUT_NS / SDL_NS_PER_SECOND),
+                            waitAll ? "all" : "any", num_fences, completed);
+    }
     return true;
 }
 
@@ -2691,8 +2706,15 @@ static void WEBGPU_INTERNAL_HandlePendingDestroys(WebGPURenderer *renderer)
                 }
                 break;
             case WEBGPU_QUEUED_DESTROY_FENCE:
-                WEBGPU_INTERNAL_WaitForFences(renderer, true, &current->resource.fence, 1);
-
+                /* Freeing is safe either way: the callback is registered
+                   WGPUCallbackMode_WaitAnyOnly, so it can only run inside a
+                   wgpuInstanceWaitAny on this future and nothing waits on it
+                   again after here. A fence that never resolved is still worth
+                   saying out loud -- it means work was submitted that the queue
+                   never reported finishing. */
+                if (!WEBGPU_INTERNAL_WaitForFences(renderer, true, &current->resource.fence, 1)) {
+                    SDL_LogError(SDL_LOG_CATEGORY_GPU, "Destroying a fence that never resolved: %s", SDL_GetError());
+                }
                 SDL_free(current->resource.fence);
                 wasReleased = true;
 
@@ -4228,7 +4250,13 @@ static bool WEBGPU_INTERNAL_MapBuffer(WebGPURenderer *renderer, WebGPUBufferCont
                                                                      .userdata2 = NULL,
                                                                  }));
 
-    WEBGPU_WaitForFences((SDL_GPURenderer *)renderer, true, (SDL_GPUFence **)&bufferMapFence, 1);
+    if (!WEBGPU_WaitForFences((SDL_GPURenderer *)renderer, true, (SDL_GPUFence **)&bufferMapFence, 1)) {
+        /* The map never completed, so the bytes behind this buffer are not
+           there. Returning true would hand the caller whatever the mapped
+           range happens to contain and call it a download. */
+        SDL_free(bufferMapFence);
+        return false;
+    }
 
     SDL_free(bufferMapFence);
     return true;
