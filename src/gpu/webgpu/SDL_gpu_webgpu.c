@@ -3343,7 +3343,14 @@ static SDL_GPUSampler *WEBGPU_CreateSampler(SDL_GPURenderer *device, const SDL_G
     desc.addressModeW = SDLToWebGPU_AddressMode[createInfo->address_mode_w];
     desc.compare = SDLToWebGPU_CompareFunc[createInfo->compare_op];
 
-    desc.lodMaxClamp = createInfo->max_lod == 0 ? 32.0f : createInfo->max_lod;
+    /* max_lod is passed through, as the Vulkan and D3D12 backends pass it
+       through: a zero means the caller wants level 0 only, which is how
+       SDL_GPU_SAMPLERMIPMAPMODE with no mip chain is expressed. Reading a
+       zero as "no clamp" made every such sampler walk the whole chain --
+       measured as a minified draw returning the 1x1 level where its caller
+       had asked for level 0. The samplers this backend creates for its own
+       blits ask for the chain explicitly, below. */
+    desc.lodMaxClamp = createInfo->max_lod;
     desc.lodMinClamp = createInfo->min_lod < 0 ? 0 : createInfo->min_lod;
     desc.magFilter = SDLToWebGPU_FilterMode[createInfo->mag_filter];
     desc.minFilter = SDLToWebGPU_FilterMode[createInfo->min_filter];
@@ -3847,6 +3854,7 @@ static void WEBGPU_INTERNAL_InitBlitResources(
         .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
         .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
         .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .max_lod = 1000,
     };
 
     renderer->blitResources.blitNearestSampler = WEBGPU_CreateSampler(
@@ -3864,6 +3872,7 @@ static void WEBGPU_INTERNAL_InitBlitResources(
         .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
         .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
         .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .max_lod = 1000,
     };
 
     renderer->blitResources.blitLinearSampler = WEBGPU_CreateSampler(
