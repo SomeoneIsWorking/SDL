@@ -560,6 +560,57 @@ static bool Emscripten_SetWindowFillDocument(SDL_VideoDevice *_this, SDL_Window 
     return true;
 }
 
+/* A browser reports the parts of the display a control must stay out of -- a
+ * notch, a rounded corner, the home indicator -- only through the CSS
+ * `env(safe-area-inset-*)` variables, and only for the viewport. They cannot
+ * be read directly, so each is parked on a custom property and read back
+ * resolved. A browser without the feature resolves the `0px` fallback, which
+ * is also the correct answer for a display with nothing in the way.
+ *
+ * The viewport's insets are not the window's: the canvas may be inset from the
+ * page, or larger than the visible area. This intersects the viewport's safe
+ * rectangle with the canvas box and reports the result in window coordinates,
+ * so a canvas nowhere near an intrusion correctly reports no inset.
+ */
+void Emscripten_UpdateWindowSafeArea(SDL_Window *window)
+{
+    SDL_WindowData *data = window->internal;
+    int insets[4] = { 0, 0, 0, 0 };
+
+    if (!data) {
+        return;
+    }
+
+    MAIN_THREAD_EM_ASM({
+        var canvas = document.querySelector(UTF8ToString($0));
+        var out = $1 >> 2;
+        if (!canvas) {
+            HEAP32[out] = HEAP32[out + 1] = HEAP32[out + 2] = HEAP32[out + 3] = 0;
+            return;
+        }
+        var root = document.documentElement;
+        var read = function(side) {
+            var name = '--sdl3-safe-area-inset';
+            root.style.setProperty(name, 'env(safe-area-inset-' + side + ', 0px)');
+            var value = parseFloat(getComputedStyle(root).getPropertyValue(name));
+            root.style.removeProperty(name);
+            return isFinite(value) ? value : 0;
+        };
+        var box = canvas.getBoundingClientRect();
+        var width = window.innerWidth;
+        var height = window.innerHeight;
+        var clamp = function(value, limit) {
+            return Math.max(0, Math.min(Math.round(value), Math.round(limit)));
+        };
+        HEAP32[out] = clamp(read('left') - box.left, box.width);
+        HEAP32[out + 1] = clamp(box.right - (width - read('right')), box.width);
+        HEAP32[out + 2] = clamp(read('top') - box.top, box.height);
+        HEAP32[out + 3] = clamp(box.bottom - (height - read('bottom')), box.height);
+    }, data->canvas_id, insets);
+
+    SDL_SetWindowSafeAreaInsets(window, insets[0], insets[1], insets[2], insets[3]);
+}
+
 static bool Emscripten_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props)
 {
     SDL_WindowData *wdata;
@@ -628,6 +679,8 @@ static bool Emscripten_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, 
             _requestFullscreenThroughSDL($0);
         };
     }, window);
+
+    Emscripten_UpdateWindowSafeArea(window);
 
     // Ensure various things are added to the window's properties
     SDL_SetStringProperty(window->props, SDL_PROP_WINDOW_EMSCRIPTEN_CANVAS_ID_STRING, wdata->canvas_id);

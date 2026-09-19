@@ -56,6 +56,7 @@ struct SDL_WindowData
 
 extern SDL_Window *Emscripten_fill_document_window;
 
+void Emscripten_UpdateWindowSafeArea(SDL_Window *window);
 bool Emscripten_ShouldSetSwapInterval(int interval);
 
 #endif // SDL_emscriptenvideo_h_
