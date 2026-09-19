@@ -390,6 +390,7 @@ dep_option(SDL_VIVANTE             "Use Vivante EGL video driver" ON "${UNIX_SYS
 dep_option(SDL_VULKAN              "Enable Vulkan support" "${SDL_VULKAN_DEFAULT}" "SDL_VIDEO;ANDROID OR APPLE OR LINUX OR FREEBSD OR OPENBSD OR WINDOWS OR CYGWIN" OFF)
 dep_option(SDL_WEBGPU              "Enable experimental WebGPU support" "${SDL_WGPU_DEFAULT}" "SDL_GPU;WINDOWS OR UNIX OR EMSCRIPTEN;NOT APPLE" OFF)
 dep_option(SDL_WEBGPU_EMSCRIPTEN   "Allow SDL to automatically link with Emscripten's WebGPU implementation" "TRUE" "SDL_WEBGPU;EMSCRIPTEN" OFF)
+set(SDL_EMDAWNWEBGPU_PORT "emdawnwebgpu" CACHE STRING "Emdawnwebgpu port passed to emcc --use-port: the name of the port Emscripten vendors, or the path to an emdawnwebgpu.port.py of your own")
 dep_option(SDL_RENDER_VULKAN       "Enable the Vulkan render driver" ON "SDL_RENDER;SDL_VULKAN" OFF)
 dep_option(SDL_METAL               "Enable Metal support" ON "APPLE" OFF)
 set_option(SDL_OPENVR              "Use OpenVR video driver" OFF)
