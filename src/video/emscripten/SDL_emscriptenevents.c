@@ -563,6 +563,10 @@ static EM_BOOL Emscripten_HandleResize(int eventType, const EmscriptenUiEvent *u
         SDL_SendWindowEvent(window_data->window, SDL_EVENT_WINDOW_RESIZED, SDL_lroundf(w), SDL_lroundf(h));
     }
 
+    // A rotation and the mobile browser's retracting address bar both arrive
+    // here, and both move the display's unusable edges.
+    Emscripten_UpdateWindowSafeArea(window_data->window);
+
     return 0;
 }
 
