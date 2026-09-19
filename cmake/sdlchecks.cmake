@@ -948,15 +948,14 @@ macro(CheckWebGPU)
   set(HAVE_WEBGPU FALSE)
   if(SDL_WEBGPU)
     if(SDL_WEBGPU_EMSCRIPTEN)
-      message(STATUS "Using Emdawnwebgpu (remote) as WebGPU implementation")
-      # NOTE: Since the Emdawnwebgpu port is the official Emscripten provided
-      # way to link WebGPU, I thought it would be okay to just have SDL do it.
-      # There's an option to disable this, and since the port is just a python script
-      # we could use our own if supply-chain attacks are an issue.
-      # (Although, if somebody's breached the Emscripten repo there's probably bigger issues.)
+      message(STATUS "Using Emdawnwebgpu as WebGPU implementation: ${SDL_EMDAWNWEBGPU_PORT}")
+      # Emdawnwebgpu is the Emscripten-provided way to link WebGPU, so SDL links
+      # it itself. SDL_WEBGPU_EMSCRIPTEN turns that off, and SDL_EMDAWNWEBGPU_PORT
+      # chooses which port file to use: the name of the one Emscripten vendors, or
+      # the path to a port file of your own if you need a fix or a version that
+      # Emscripten has not rolled in yet.
       # https://github.com/emscripten-core/emscripten/blob/main/tools/ports/emdawnwebgpu.py
-      sdl_link_dependency(sdlgpu-emdawnwebgpu LINK_OPTIONS "--use-port=emdawnwebgpu")
-      message("-- Using emdawnwgpu as WebGPU implementation")
+      sdl_link_dependency(sdlgpu-emdawnwebgpu LINK_OPTIONS "--use-port=${SDL_EMDAWNWEBGPU_PORT}")
       set(HAVE_WEBGPU_EMSCRIPTEN TRUE)
       set(HAVE_WEBGPU TRUE)
     else()
