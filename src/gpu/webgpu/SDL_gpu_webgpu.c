@@ -1257,7 +1257,15 @@ typedef struct WebGPUGraphicsPipeline
 {
     GraphicsPipelineCommonHeader header;
 
+    /* `pipeline` carries stripIndexFormat Uint16 when the topology is a
+       strip, and Undefined otherwise; `pipelineStrip32` is the same pipeline
+       with Uint32 and is NULL for a non-strip topology. WebGPU validates a
+       strip pipeline's index format against the bound index buffer on every
+       indexed draw, and an Undefined one fails that check -- taking the whole
+       command buffer down with it -- so a strip needs one variant per index
+       size and the draw picks between them. */
     WGPURenderPipeline pipeline;
+    WGPURenderPipeline pipelineStrip32;
 
     WebGPUShaderBindGroupLayouts vertexBindGroupLayouts;
     WebGPUShaderBindGroupLayouts fragmentBindGroupLayouts;
@@ -1308,6 +1316,10 @@ typedef struct WebGPUCommandBuffer
     WGPUComputePassEncoder computePassEncoder;
 
     WebGPUGraphicsPipeline *boundGraphicsPipeline;
+    /* The handle actually set on the render pass encoder, which is not always
+       boundGraphicsPipeline->pipeline: a strip pipeline has an index-format
+       variant chosen per draw. */
+    WGPURenderPipeline currentPipelineHandle;
     WebGPUComputePipeline *boundComputePipeline;
 
     WebGPUSubmittedCommandBuffer submitted;
@@ -3740,7 +3752,20 @@ static SDL_GPUGraphicsPipeline *WEBGPU_CreateGraphicsPipeline(SDL_GPURenderer *d
     pipelineDesc.nextInChain = NULL;
 
     pipeline = SDL_calloc(1, sizeof(WebGPUGraphicsPipeline));
-    pipeline->pipeline = wgpuDeviceCreateRenderPipeline(((WebGPURenderer *)driverData)->device, &pipelineDesc);
+    if (primitiveState.topology == WGPUPrimitiveTopology_TriangleStrip ||
+        primitiveState.topology == WGPUPrimitiveTopology_LineStrip) {
+        /* One variant per index size, because the format is a property of the
+           pipeline here and of the draw everywhere else. Both are created now,
+           while the descriptor and its arrays are still alive. */
+        primitiveState.stripIndexFormat = WGPUIndexFormat_Uint16;
+        pipelineDesc.primitive = primitiveState;
+        pipeline->pipeline = wgpuDeviceCreateRenderPipeline(((WebGPURenderer *)driverData)->device, &pipelineDesc);
+        primitiveState.stripIndexFormat = WGPUIndexFormat_Uint32;
+        pipelineDesc.primitive = primitiveState;
+        pipeline->pipelineStrip32 = wgpuDeviceCreateRenderPipeline(((WebGPURenderer *)driverData)->device, &pipelineDesc);
+    } else {
+        pipeline->pipeline = wgpuDeviceCreateRenderPipeline(((WebGPURenderer *)driverData)->device, &pipelineDesc);
+    }
 
     pipeline->vertexBindGroupLayouts = *vertexShader->bindGroupLayouts;
     pipeline->fragmentBindGroupLayouts = *fragmentShader->bindGroupLayouts;
@@ -3764,6 +3789,9 @@ static void WEBGPU_ReleaseGraphicsPipeline(SDL_GPURenderer *device, SDL_GPUGraph
     WebGPUGraphicsPipeline *pipeline = (WebGPUGraphicsPipeline *)_pipeline;
 
     wgpuRenderPipelineRelease(pipeline->pipeline);
+    if (pipeline->pipelineStrip32) {
+        wgpuRenderPipelineRelease(pipeline->pipelineStrip32);
+    }
     SDL_free(pipeline);
 }
 
@@ -4830,6 +4858,7 @@ static void WEBGPU_BindGraphicsPipeline(SDL_GPUCommandBuffer *renderPass, SDL_GP
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)renderPass;
     wgpuRenderPassEncoderSetPipeline(cmdBuf->renderPassEncoder, ((WebGPUGraphicsPipeline *)graphicsPipeline)->pipeline);
+    cmdBuf->currentPipelineHandle = ((WebGPUGraphicsPipeline *)graphicsPipeline)->pipeline;
 
     WEBGPU_INTERNAL_ClearRenderPassBindings(cmdBuf);
 
@@ -5021,6 +5050,18 @@ static void WEBGPU_BindComputeStorageBuffers(SDL_GPUCommandBuffer *commandBuffer
 
 static void WEBGPU_INTERNAL_BindQueuedGraphicsResources(WebGPUCommandBuffer *cmdBuf)
 {
+    /* A strip pipeline's index format must match the bound index buffer's, so
+       the variant is chosen here, where both are known, rather than when the
+       pipeline was bound. */
+    if (cmdBuf->boundGraphicsPipeline && cmdBuf->boundGraphicsPipeline->pipelineStrip32) {
+        WGPURenderPipeline wanted = cmdBuf->vertexStageBinds.indexFormat == WGPUIndexFormat_Uint32
+                                        ? cmdBuf->boundGraphicsPipeline->pipelineStrip32
+                                        : cmdBuf->boundGraphicsPipeline->pipeline;
+        if (wanted != cmdBuf->currentPipelineHandle) {
+            wgpuRenderPassEncoderSetPipeline(cmdBuf->renderPassEncoder, wanted);
+            cmdBuf->currentPipelineHandle = wanted;
+        }
+    }
     WGPUBindGroup bindGroups[4] = {
         WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_VERTEXSAMPLERSTORAGE),
         WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_VERTEXUNIFORMS),
