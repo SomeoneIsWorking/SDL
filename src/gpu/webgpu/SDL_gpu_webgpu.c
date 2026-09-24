@@ -1363,6 +1363,7 @@ typedef struct WebGPUCommandBuffer
 
         Uint32 currentUniformWriteOffsets[4];
         Uint32 currentUniformReadOffsets[4];
+        Uint32 currentUniformLengths[4]; // of the push the read offset names; 0 before any
 
         bool shouldBindVertexBuffers;
         bool shouldBindIndexBuffer;
@@ -1379,6 +1380,7 @@ typedef struct WebGPUCommandBuffer
 
         Uint32 currentUniformWriteOffsets[4];
         Uint32 currentUniformReadOffsets[4];
+        Uint32 currentUniformLengths[4]; // of the push the read offset names; 0 before any
 
         bool samplerStorageBindGroupOutdated;
         bool uniformBindGroupOutdated; // The bind group itself can never become outdated, but the read offsets can.
@@ -1395,6 +1397,7 @@ typedef struct WebGPUCommandBuffer
 
         Uint32 currentUniformWriteOffsets[4];
         Uint32 currentUniformReadOffsets[4];
+        Uint32 currentUniformLengths[4]; // of the push the read offset names; 0 before any
 
         bool samplerStorageBindGroupOutdated;
         bool readWriteStorageBindGroupOutdated;
@@ -4767,38 +4770,57 @@ static void WEBGPU_INTERNAL_StageUniformData(WebGPUCommandBuffer *cmdBuf, Uint32
     staged->used = end;
 }
 
+/* A push identical to the one the slot already reads changes nothing a draw
+   can see, so it stages no copy and leaves the bind group alone. A game pushes
+   its uniforms for every draw, most of them unchanged since the last, and
+   each changed push costs its bind group a set -- a crossing into JavaScript
+   in a browser -- at the next draw. The comparison is against the staged
+   bytes themselves, which stay in place until the command buffer submits. */
+static void WEBGPU_INTERNAL_PushUniformData(WebGPUCommandBuffer *cmdBuf, Uint32 stagedSlot, Uint32 slotIndex,
+                                            Uint32 *writeOffsets, Uint32 *readOffsets, Uint32 *lengths,
+                                            bool *bindGroupOutdated, const void *data, Uint32 length)
+{
+    const WebGPUStagedUniforms *staged = &cmdBuf->stagedUniforms[stagedSlot];
+
+    if (length != 0 && lengths[slotIndex] == length && readOffsets[slotIndex] + length <= staged->used &&
+        SDL_memcmp(staged->data + readOffsets[slotIndex], data, length) == 0) {
+        return;
+    }
+    WEBGPU_INTERNAL_StageUniformData(cmdBuf, stagedSlot, writeOffsets[slotIndex], data, length);
+    readOffsets[slotIndex] = writeOffsets[slotIndex];
+    writeOffsets[slotIndex] += ALIGN_VALUE(length, 256);
+    lengths[slotIndex] = length;
+    *bindGroupOutdated = true;
+}
+
 static void WEBGPU_PushVertexUniformData(SDL_GPUCommandBuffer *commandBuffer, Uint32 slotIndex, const void *data, uint32_t length)
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
 
-    WEBGPU_INTERNAL_StageUniformData(cmdBuf, slotIndex, cmdBuf->vertexStageBinds.currentUniformWriteOffsets[slotIndex], data, length);
-
-    // jank and gross but it works
-    cmdBuf->vertexStageBinds.currentUniformReadOffsets[slotIndex] = cmdBuf->vertexStageBinds.currentUniformWriteOffsets[slotIndex];
-    cmdBuf->vertexStageBinds.currentUniformWriteOffsets[slotIndex] += ALIGN_VALUE(length, 256);
-    cmdBuf->vertexStageBinds.uniformBindGroupOutdated = true;
+    WEBGPU_INTERNAL_PushUniformData(cmdBuf, slotIndex, slotIndex, cmdBuf->vertexStageBinds.currentUniformWriteOffsets,
+                                    cmdBuf->vertexStageBinds.currentUniformReadOffsets,
+                                    cmdBuf->vertexStageBinds.currentUniformLengths,
+                                    &cmdBuf->vertexStageBinds.uniformBindGroupOutdated, data, length);
 }
 
 static void WEBGPU_PushFragmentUniformData(SDL_GPUCommandBuffer *commandBuffer, Uint32 slotIndex, const void *data, uint32_t length)
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
 
-    WEBGPU_INTERNAL_StageUniformData(cmdBuf, 4 + slotIndex, cmdBuf->fragmentStageBinds.currentUniformWriteOffsets[slotIndex], data, length);
-
-    cmdBuf->fragmentStageBinds.currentUniformReadOffsets[slotIndex] = cmdBuf->fragmentStageBinds.currentUniformWriteOffsets[slotIndex];
-    cmdBuf->fragmentStageBinds.currentUniformWriteOffsets[slotIndex] += ALIGN_VALUE(length, 256);
-    cmdBuf->fragmentStageBinds.uniformBindGroupOutdated = true;
+    WEBGPU_INTERNAL_PushUniformData(cmdBuf, 4 + slotIndex, slotIndex, cmdBuf->fragmentStageBinds.currentUniformWriteOffsets,
+                                    cmdBuf->fragmentStageBinds.currentUniformReadOffsets,
+                                    cmdBuf->fragmentStageBinds.currentUniformLengths,
+                                    &cmdBuf->fragmentStageBinds.uniformBindGroupOutdated, data, length);
 }
 
 static void WEBGPU_PushComputeUniformData(SDL_GPUCommandBuffer *commandBuffer, Uint32 slotIndex, const void *data, uint32_t length)
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
 
-    WEBGPU_INTERNAL_StageUniformData(cmdBuf, 8 + slotIndex, cmdBuf->computeStageBinds.currentUniformWriteOffsets[slotIndex], data, length);
-
-    cmdBuf->computeStageBinds.currentUniformReadOffsets[slotIndex] = cmdBuf->computeStageBinds.currentUniformWriteOffsets[slotIndex];
-    cmdBuf->computeStageBinds.currentUniformWriteOffsets[slotIndex] += ALIGN_VALUE(length, 256);
-    cmdBuf->computeStageBinds.uniformBindGroupOutdated = true;
+    WEBGPU_INTERNAL_PushUniformData(cmdBuf, 8 + slotIndex, slotIndex, cmdBuf->computeStageBinds.currentUniformWriteOffsets,
+                                    cmdBuf->computeStageBinds.currentUniformReadOffsets,
+                                    cmdBuf->computeStageBinds.currentUniformLengths,
+                                    &cmdBuf->computeStageBinds.uniformBindGroupOutdated, data, length);
 }
 
 static void WEBGPU_SetBlendConstants(SDL_GPUCommandBuffer *commandBuffer, SDL_FColor blendConstants)
