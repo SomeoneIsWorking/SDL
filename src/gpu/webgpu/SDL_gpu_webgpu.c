@@ -803,6 +803,9 @@ typedef struct WebGPUFence WebGPUFence;
 typedef struct WebGPUSubmittedCommandBuffer WebGPUSubmittedCommandBuffer;
 typedef struct WebGPUQueuedDestroy WebGPUQueuedDestroy;
 
+// Uniform buffers by raw index: vertex slots 0-3, fragment 4-7, compute 8-11.
+#define WEBGPU_UNIFORM_BUFFER_SLOTS 12
+
 typedef struct WebGPURenderer
 {
     WGPUInstance instance;
@@ -813,7 +816,7 @@ typedef struct WebGPURenderer
     // 0-3: Vertex
     // 4-7: Fragment
     // 8-11: Compute
-    WebGPUBufferContainer *uniformBuffers[12];
+    WebGPUBufferContainer *uniformBuffers[WEBGPU_UNIFORM_BUFFER_SLOTS];
     // Pre-made bind groups for the uniforms.
     // 0: Vertex, 1: Fragment, 2: Compute
     WGPUBindGroup uniformBufferBindGroups[3];
@@ -1198,15 +1201,16 @@ typedef struct WebGPUQueuedResourceBindIndexBuffer
     Uint32 offset;
 } WebGPUQueuedResourceBindIndexBuffer;
 
-typedef struct WebGPUQueuedUniformDataUpload
+/* One command buffer's uniform data for one uniform buffer, written to the
+   buffer in a single queue write when the command buffer is submitted. A
+   command buffer's pushes to a slot start at offset 0 and only grow, so the
+   bytes are contiguous. */
+typedef struct WebGPUStagedUniforms
 {
-    void *data;
-
-    Uint64 offset;
-    Uint32 length;
-    // This doesn't care about stage visibility. It's the raw index of the uniform buffer it'll write to.
-    Uint32 slot;
-} WebGPUQueuedUniformDataUpload;
+    Uint8 *data;
+    Uint32 used;
+    Uint32 capacity;
+} WebGPUStagedUniforms;
 
 typedef struct WebGPUQueuedDestroy
 {
@@ -1338,11 +1342,8 @@ typedef struct WebGPUCommandBuffer
 
     WebGPUSubmittedCommandBuffer submitted;
 
-    // These'll run right before the command buffer is submitted.
-    WebGPUQueuedUniformDataUpload *queuedUniformUploads;
-
-    Uint32 numQueuedUniformUploads;
-    Uint32 queuedUniformUploadCapacity;
+    // Written right before the command buffer is submitted.
+    WebGPUStagedUniforms stagedUniforms[WEBGPU_UNIFORM_BUFFER_SLOTS];
 
     size_t totalUniformDataLen;
 
@@ -1921,12 +1922,11 @@ static void WEBGPU_INTERNAL_ClearComputePassBindings(WebGPUCommandBuffer *cmdBuf
 
 static void WEBGPU_INTERNAL_FreeCommandBuffer(WebGPUCommandBuffer *cmdBuf)
 {
-    for (Uint32 i = 0; i < cmdBuf->numQueuedUniformUploads; i++) {
-        SDL_free(cmdBuf->queuedUniformUploads[i].data);
+    for (Uint32 i = 0; i < WEBGPU_UNIFORM_BUFFER_SLOTS; i++) {
+        SDL_free(cmdBuf->stagedUniforms[i].data);
     }
     SDL_free(cmdBuf->surfaces);
     SDL_free(cmdBuf->acquiredSwapchainTextures);
-    SDL_free(cmdBuf->queuedUniformUploads);
     SDL_free(cmdBuf);
 }
 
@@ -4753,20 +4753,28 @@ static void WEBGPU_SetViewport(SDL_GPUCommandBuffer *renderPass, const SDL_GPUVi
     wgpuRenderPassEncoderSetViewport(((WebGPUCommandBuffer *)renderPass)->renderPassEncoder, viewport->x, viewport->y, viewport->w, viewport->h, viewport->min_depth, viewport->max_depth);
 }
 
+static void WEBGPU_INTERNAL_StageUniformData(WebGPUCommandBuffer *cmdBuf, Uint32 slot, Uint32 offset, const void *data, Uint32 length)
+{
+    WebGPUStagedUniforms *staged = &cmdBuf->stagedUniforms[slot];
+    Uint32 end = offset + ALIGN_VALUE(length, 256);
+
+    if (end > staged->capacity) {
+        Uint32 capacity = staged->capacity ? staged->capacity : 4096;
+        while (capacity < end) {
+            capacity *= 2;
+        }
+        staged->data = SDL_realloc(staged->data, capacity);
+        staged->capacity = capacity;
+    }
+    SDL_memcpy(staged->data + offset, data, length);
+    staged->used = end;
+}
+
 static void WEBGPU_PushVertexUniformData(SDL_GPUCommandBuffer *commandBuffer, Uint32 slotIndex, const void *data, uint32_t length)
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
 
-    WebGPUQueuedUniformDataUpload upload = {
-        .data = SDL_malloc(ALIGN_VALUE(length, 256)),
-        .length = ALIGN_VALUE(length, 256),
-        .offset = cmdBuf->vertexStageBinds.currentUniformWriteOffsets[slotIndex],
-        .slot = slotIndex,
-    };
-    SDL_memcpy(upload.data, data, length);
-
-    WEBGPU_INTERNAL_InsertElementIntoArray(cmdBuf->queuedUniformUploads, cmdBuf->queuedUniformUploadCapacity,
-                                           cmdBuf->numQueuedUniformUploads, WebGPUQueuedUniformDataUpload, upload);
+    WEBGPU_INTERNAL_StageUniformData(cmdBuf, slotIndex, cmdBuf->vertexStageBinds.currentUniformWriteOffsets[slotIndex], data, length);
 
     // jank and gross but it works
     cmdBuf->vertexStageBinds.currentUniformReadOffsets[slotIndex] = cmdBuf->vertexStageBinds.currentUniformWriteOffsets[slotIndex];
@@ -4778,16 +4786,7 @@ static void WEBGPU_PushFragmentUniformData(SDL_GPUCommandBuffer *commandBuffer, 
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
 
-    WebGPUQueuedUniformDataUpload upload = {
-        .data = SDL_malloc(ALIGN_VALUE(length, 256)),
-        .length = ALIGN_VALUE(length, 256),
-        .offset = cmdBuf->fragmentStageBinds.currentUniformWriteOffsets[slotIndex],
-        .slot = 4 + slotIndex,
-    };
-    SDL_memcpy(upload.data, data, length);
-
-    WEBGPU_INTERNAL_InsertElementIntoArray(cmdBuf->queuedUniformUploads, cmdBuf->queuedUniformUploadCapacity,
-                                           cmdBuf->numQueuedUniformUploads, WebGPUQueuedUniformDataUpload, upload);
+    WEBGPU_INTERNAL_StageUniformData(cmdBuf, 4 + slotIndex, cmdBuf->fragmentStageBinds.currentUniformWriteOffsets[slotIndex], data, length);
 
     cmdBuf->fragmentStageBinds.currentUniformReadOffsets[slotIndex] = cmdBuf->fragmentStageBinds.currentUniformWriteOffsets[slotIndex];
     cmdBuf->fragmentStageBinds.currentUniformWriteOffsets[slotIndex] += ALIGN_VALUE(length, 256);
@@ -4798,16 +4797,7 @@ static void WEBGPU_PushComputeUniformData(SDL_GPUCommandBuffer *commandBuffer, U
 {
     WebGPUCommandBuffer *cmdBuf = (WebGPUCommandBuffer *)commandBuffer;
 
-    WebGPUQueuedUniformDataUpload upload = {
-        .data = SDL_malloc(ALIGN_VALUE(length, 256)),
-        .length = ALIGN_VALUE(length, 256),
-        .offset = cmdBuf->computeStageBinds.currentUniformWriteOffsets[slotIndex],
-        .slot = 8 + slotIndex,
-    };
-    SDL_memcpy(upload.data, data, length);
-
-    WEBGPU_INTERNAL_InsertElementIntoArray(cmdBuf->queuedUniformUploads, cmdBuf->queuedUniformUploadCapacity,
-                                           cmdBuf->numQueuedUniformUploads, WebGPUQueuedUniformDataUpload, upload);
+    WEBGPU_INTERNAL_StageUniformData(cmdBuf, 8 + slotIndex, cmdBuf->computeStageBinds.currentUniformWriteOffsets[slotIndex], data, length);
 
     cmdBuf->computeStageBinds.currentUniformReadOffsets[slotIndex] = cmdBuf->computeStageBinds.currentUniformWriteOffsets[slotIndex];
     cmdBuf->computeStageBinds.currentUniformWriteOffsets[slotIndex] += ALIGN_VALUE(length, 256);
@@ -5459,12 +5449,14 @@ static void WEBGPU_DispatchComputeIndirect(SDL_GPUCommandBuffer *commandBuffer, 
 
 static void WEBGPU_INTERNAL_UploadQueuedUniformData(WebGPUCommandBuffer *cmdBuf)
 {
-    for (int i = 0; i < cmdBuf->numQueuedUniformUploads; i++) {
-        WebGPUQueuedUniformDataUpload upload = cmdBuf->queuedUniformUploads[i];
-
-        wgpuQueueWriteBuffer(cmdBuf->queue, cmdBuf->renderer->uniformBuffers[upload.slot]->activeBuffer->buffer, upload.offset, upload.data, upload.length);
-        SDL_free(upload.data);
-        cmdBuf->queuedUniformUploads[i].data = NULL;
+    // One write per uniform buffer, however many pushes filled it.
+    for (Uint32 slot = 0; slot < WEBGPU_UNIFORM_BUFFER_SLOTS; slot++) {
+        WebGPUStagedUniforms *staged = &cmdBuf->stagedUniforms[slot];
+        if (staged->used == 0) {
+            continue;
+        }
+        wgpuQueueWriteBuffer(cmdBuf->queue, cmdBuf->renderer->uniformBuffers[slot]->activeBuffer->buffer, 0, staged->data, staged->used);
+        staged->used = 0;
     }
 }
 
@@ -5561,7 +5553,7 @@ static void WEBGPU_DestroyDevice(SDL_GPUDevice *device)
 
     SDL_LockMutex(renderer->destroyingSelfLock);
 
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < WEBGPU_UNIFORM_BUFFER_SLOTS; i++) {
         WEBGPU_INTERNAL_ReleaseBufferContainer(renderer, renderer->uniformBuffers[i]);
     }
     for (int i = 0; i < 3; i++) {
@@ -5816,7 +5808,7 @@ static bool WEBGPU_SetAllowedFramesInFlight(SDL_GPURenderer *driverData, Uint32 
 
 static void WEBGPU_INTERNAL_InitUniformBuffers(WebGPURenderer *renderer)
 {
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < WEBGPU_UNIFORM_BUFFER_SLOTS; i++) {
         // 1048576 == 1MiB == 2²⁰
         renderer->uniformBuffers[i] = WEBGPU_INTERNAL_CreateBufferContainer(renderer, 1048576, 0, WEBGPU_BUFFER_TYPE_UNIFORM, false, NULL);
     }
