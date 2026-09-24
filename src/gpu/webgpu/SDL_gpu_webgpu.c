@@ -5106,11 +5106,15 @@ static void WEBGPU_INTERNAL_BindQueuedGraphicsResources(WebGPUCommandBuffer *cmd
             cmdBuf->currentPipelineHandle = wanted;
         }
     }
+    /* Only what changed since the last draw: a set group stays set across
+       draws, and building and hashing a cache key, then crossing into the
+       browser, for all four groups on every draw was most of this path's
+       cost when a draw changed nothing but its geometry. */
     WGPUBindGroup bindGroups[4] = {
-        WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_VERTEXSAMPLERSTORAGE),
-        WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_VERTEXUNIFORMS),
-        WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_FRAGMENTSAMPLERSTORAGE),
-        WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_FRAGMENTUNIFORMS),
+        cmdBuf->vertexStageBinds.samplerStorageBindGroupOutdated ? WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_VERTEXSAMPLERSTORAGE) : NULL,
+        cmdBuf->vertexStageBinds.uniformBindGroupOutdated ? WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_VERTEXUNIFORMS) : NULL,
+        cmdBuf->fragmentStageBinds.samplerStorageBindGroupOutdated ? WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_FRAGMENTSAMPLERSTORAGE) : NULL,
+        cmdBuf->fragmentStageBinds.uniformBindGroupOutdated ? WEBGPU_INTERNAL_GetBindGroup(cmdBuf, WEBGPU_BINDGROUP_FRAGMENTUNIFORMS) : NULL,
     };
 
     for (int i = 0; i < 4; i++) {
