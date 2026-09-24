@@ -1257,6 +1257,13 @@ typedef struct WebGPUShader
     char *entrypoint;
     WebGPUShaderBindGroupLayouts *bindGroupLayouts;
 
+    // What the shader declares, from its create info: a stage's bind group
+    // holds exactly these, however many resources the pass has bound.
+    Uint32 numSamplers;
+    Uint32 numStorageTextures;
+    Uint32 numStorageBuffers;
+    Uint32 numUniformBuffers;
+
     Uint32 refCount;
 } WebGPUShader;
 
@@ -2817,17 +2824,18 @@ static WebGPUBindGroupCacheKey WEBGPU_INTERNAL_GenerateKeyForCurrentBinds(WebGPU
     switch (desiredGroup) {
     case WEBGPU_BINDGROUP_VERTEXSAMPLERSTORAGE:
     {
+        const GraphicsPipelineCommonHeader *declared = &cmdBuf->boundGraphicsPipeline->header;
         result.layoutID = cmdBuf->boundGraphicsPipeline->vertexBindGroupLayouts.samplerStorageLayoutID;
-        for (int i = 0; i < MAX_TEXTURE_SAMPLERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < declared->num_vertex_samplers; i++) {
             result.boundTexturesIDs[i] = cmdBuf->vertexStageBinds.boundTextures[i] ? cmdBuf->vertexStageBinds.boundTextures[i]->identifier : 0;
             result.boundSamplersIDs[i] = cmdBuf->vertexStageBinds.boundSamplers[i] ? cmdBuf->vertexStageBinds.boundSamplers[i]->identifier : 0;
         }
 
-        for (int i = 0; i < MAX_STORAGE_TEXTURES_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < declared->num_vertex_storage_textures; i++) {
             result.boundReadOnlyStorageTexturesIDs[i] = cmdBuf->vertexStageBinds.boundStorageTextures[i] ? cmdBuf->vertexStageBinds.boundStorageTextures[i]->identifier : 0;
         }
 
-        for (int i = 0; i < MAX_STORAGE_BUFFERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < declared->num_vertex_storage_buffers; i++) {
             result.boundReadOnlyStorageBuffersIDs[i] = cmdBuf->vertexStageBinds.boundStorageBuffers[i] ? cmdBuf->vertexStageBinds.boundStorageBuffers[i]->identifier : 0;
         }
         break;
@@ -2839,17 +2847,18 @@ static WebGPUBindGroupCacheKey WEBGPU_INTERNAL_GenerateKeyForCurrentBinds(WebGPU
     }
     case WEBGPU_BINDGROUP_FRAGMENTSAMPLERSTORAGE:
     {
+        const GraphicsPipelineCommonHeader *declared = &cmdBuf->boundGraphicsPipeline->header;
         result.layoutID = cmdBuf->boundGraphicsPipeline->fragmentBindGroupLayouts.samplerStorageLayoutID;
-        for (int i = 0; i < MAX_TEXTURE_SAMPLERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < declared->num_fragment_samplers; i++) {
             result.boundTexturesIDs[i] = cmdBuf->fragmentStageBinds.boundTextures[i] ? cmdBuf->fragmentStageBinds.boundTextures[i]->identifier : 0;
             result.boundSamplersIDs[i] = cmdBuf->fragmentStageBinds.boundSamplers[i] ? cmdBuf->fragmentStageBinds.boundSamplers[i]->identifier : 0;
         }
 
-        for (int i = 0; i < MAX_STORAGE_TEXTURES_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < declared->num_fragment_storage_textures; i++) {
             result.boundReadOnlyStorageTexturesIDs[i] = cmdBuf->fragmentStageBinds.boundStorageTextures[i] ? cmdBuf->fragmentStageBinds.boundStorageTextures[i]->identifier : 0;
         }
 
-        for (int i = 0; i < MAX_STORAGE_BUFFERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < declared->num_fragment_storage_buffers; i++) {
             result.boundReadOnlyStorageBuffersIDs[i] = cmdBuf->fragmentStageBinds.boundStorageBuffers[i] ? cmdBuf->fragmentStageBinds.boundStorageBuffers[i]->identifier : 0;
         }
         break;
@@ -2913,7 +2922,7 @@ static WebGPUBindGroup *WEBGPU_INTERNAL_CreateBindGroup(WebGPUCommandBuffer *cmd
     {
         entries = SDL_calloc((MAX_TEXTURE_SAMPLERS_PER_STAGE * 2) + MAX_STORAGE_BUFFERS_PER_STAGE + MAX_STORAGE_TEXTURES_PER_STAGE, sizeof(*entries));
 
-        for (int i = 0; i < MAX_TEXTURE_SAMPLERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < cmdBuf->boundGraphicsPipeline->header.num_vertex_samplers; i++) {
             WebGPUSampler *samplerBind = cmdBuf->vertexStageBinds.boundSamplers[i];
             WebGPUTextureView *textureBind = cmdBuf->vertexStageBinds.boundTextures[i];
 
@@ -2934,7 +2943,7 @@ static WebGPUBindGroup *WEBGPU_INTERNAL_CreateBindGroup(WebGPUCommandBuffer *cmd
             offset++;
         }
 
-        for (int i = 0; i < MAX_STORAGE_TEXTURES_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < cmdBuf->boundGraphicsPipeline->header.num_vertex_storage_textures; i++) {
             WebGPUTextureView *textureBind = cmdBuf->vertexStageBinds.boundStorageTextures[i];
             if (textureBind == NULL) {
                 continue;
@@ -2945,7 +2954,7 @@ static WebGPUBindGroup *WEBGPU_INTERNAL_CreateBindGroup(WebGPUCommandBuffer *cmd
             offset++;
         }
 
-        for (int i = 0; i < MAX_STORAGE_BUFFERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < cmdBuf->boundGraphicsPipeline->header.num_vertex_storage_buffers; i++) {
             WebGPUBuffer *bufferBind = cmdBuf->vertexStageBinds.boundStorageBuffers[i];
             if (bufferBind == NULL) {
                 continue;
@@ -2970,7 +2979,7 @@ static WebGPUBindGroup *WEBGPU_INTERNAL_CreateBindGroup(WebGPUCommandBuffer *cmd
         // We're almost always allocating more slots than needed, but since entries gets freed at the end of this function anyways it doesn't matter much.
         entries = SDL_calloc((MAX_TEXTURE_SAMPLERS_PER_STAGE * 2) + MAX_STORAGE_BUFFERS_PER_STAGE + MAX_STORAGE_TEXTURES_PER_STAGE, sizeof(*entries));
 
-        for (int i = 0; i < MAX_TEXTURE_SAMPLERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < cmdBuf->boundGraphicsPipeline->header.num_fragment_samplers; i++) {
             WebGPUSampler *samplerBind = cmdBuf->fragmentStageBinds.boundSamplers[i];
             WebGPUTextureView *textureBind = cmdBuf->fragmentStageBinds.boundTextures[i];
 
@@ -2991,7 +3000,7 @@ static WebGPUBindGroup *WEBGPU_INTERNAL_CreateBindGroup(WebGPUCommandBuffer *cmd
             offset++;
         }
 
-        for (int i = 0; i < MAX_STORAGE_TEXTURES_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < cmdBuf->boundGraphicsPipeline->header.num_fragment_storage_textures; i++) {
             WebGPUTextureView *textureBind = cmdBuf->fragmentStageBinds.boundStorageTextures[i];
             if (textureBind == NULL) {
                 continue;
@@ -3002,7 +3011,7 @@ static WebGPUBindGroup *WEBGPU_INTERNAL_CreateBindGroup(WebGPUCommandBuffer *cmd
             offset++;
         }
 
-        for (int i = 0; i < MAX_STORAGE_BUFFERS_PER_STAGE; i++) {
+        for (Uint32 i = 0; i < cmdBuf->boundGraphicsPipeline->header.num_fragment_storage_buffers; i++) {
             WebGPUBuffer *bufferBind = cmdBuf->fragmentStageBinds.boundStorageBuffers[i];
             if (bufferBind == NULL) {
                 continue;
@@ -3559,6 +3568,10 @@ static SDL_GPUShader *WEBGPU_CreateShader(
     shader->shader = wgpuDeviceCreateShaderModule(((WebGPURenderer *)driverData)->device, &desc);
 
     shader->entrypoint = SDL_strdup(createinfo->entrypoint);
+    shader->numSamplers = createinfo->num_samplers;
+    shader->numStorageTextures = createinfo->num_storage_textures;
+    shader->numStorageBuffers = createinfo->num_storage_buffers;
+    shader->numUniformBuffers = createinfo->num_uniform_buffers;
     shader->bindGroupLayouts = WEBGPU_INTERNAL_GenerateBindGroupLayoutsForShader((char *)createinfo->code, ((WebGPURenderer *)driverData),
                                                                                  createinfo->stage == SDL_GPU_SHADERSTAGE_VERTEX ? WGPUShaderStage_Vertex : WGPUShaderStage_Fragment);
 
@@ -3783,6 +3796,14 @@ static SDL_GPUGraphicsPipeline *WEBGPU_CreateGraphicsPipeline(SDL_GPURenderer *d
 
     pipeline->vertexBindGroupLayouts = *vertexShader->bindGroupLayouts;
     pipeline->fragmentBindGroupLayouts = *fragmentShader->bindGroupLayouts;
+    pipeline->header.num_vertex_samplers = vertexShader->numSamplers;
+    pipeline->header.num_vertex_storage_textures = vertexShader->numStorageTextures;
+    pipeline->header.num_vertex_storage_buffers = vertexShader->numStorageBuffers;
+    pipeline->header.num_vertex_uniform_buffers = vertexShader->numUniformBuffers;
+    pipeline->header.num_fragment_samplers = fragmentShader->numSamplers;
+    pipeline->header.num_fragment_storage_textures = fragmentShader->numStorageTextures;
+    pipeline->header.num_fragment_storage_buffers = fragmentShader->numStorageBuffers;
+    pipeline->header.num_fragment_uniform_buffers = fragmentShader->numUniformBuffers;
 
     for (int i = 0; i < createInfo->vertex_input_state.num_vertex_buffers; i++) {
         SDL_free((void *)vertexBufferLayouts[i].attributes);
@@ -4720,6 +4741,8 @@ static void WEBGPU_BeginRenderPass(SDL_GPUCommandBuffer *commandBuffer, const SD
     wrapper->renderPassEncoder = wgpuCommandEncoderBeginRenderPass(wrapper->encoder, &desc);
     wrapper->boundGraphicsPipeline = NULL;
     wrapper->hasBoundGraphicsPipeline = false;
+    // A new encoder has nothing bound.
+    WEBGPU_INTERNAL_ClearRenderPassBindings(wrapper);
 
     SDL_free(colorAttachments);
     SDL_free(depthStencilAttachment);
@@ -4874,7 +4897,14 @@ static void WEBGPU_BindGraphicsPipeline(SDL_GPUCommandBuffer *renderPass, SDL_GP
     wgpuRenderPassEncoderSetPipeline(cmdBuf->renderPassEncoder, ((WebGPUGraphicsPipeline *)graphicsPipeline)->pipeline);
     cmdBuf->currentPipelineHandle = ((WebGPUGraphicsPipeline *)graphicsPipeline)->pipeline;
 
-    WEBGPU_INTERNAL_ClearRenderPassBindings(cmdBuf);
+    /* The pass's bindings survive a pipeline change, as on every other
+       backend: a caller that binds the same samplers under the next pipeline
+       need not bind them again. The groups are rebuilt, though, because a
+       group is only valid with the layout it was made for. */
+    cmdBuf->vertexStageBinds.samplerStorageBindGroupOutdated = true;
+    cmdBuf->vertexStageBinds.uniformBindGroupOutdated = true;
+    cmdBuf->fragmentStageBinds.samplerStorageBindGroupOutdated = true;
+    cmdBuf->fragmentStageBinds.uniformBindGroupOutdated = true;
 
     cmdBuf->boundGraphicsPipeline = ((WebGPUGraphicsPipeline *)graphicsPipeline);
     cmdBuf->hasBoundGraphicsPipeline = true;
