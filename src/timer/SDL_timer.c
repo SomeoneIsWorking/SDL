@@ -458,6 +458,10 @@ void SDL_QuitTimers(void)
     while (data->timermap) {
         entry = data->timermap;
         data->timermap = entry->next;
+        /* The browser still holds the pending timeout, and it carries this
+           entry as its argument: freeing without clearing it lets the helper
+           run later on freed memory and call whatever now sits there. */
+        emscripten_clear_timeout(entry->timeoutID);
         SDL_free(entry);
     }
 }

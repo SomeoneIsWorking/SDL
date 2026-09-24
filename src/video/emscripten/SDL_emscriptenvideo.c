@@ -198,6 +198,9 @@ static SDL_VideoDevice *Emscripten_CreateDevice(void)
     return device;
 }
 
+/* The dialog lives in the page's DOM, which exists only on the main browser
+   thread. Under PROXY_TO_PTHREAD the caller is a worker with no `document`, so
+   every DOM step is proxied to the main thread; the caller still blocks. */
 static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, int *buttonID) {
     if (emscripten_has_asyncify() && SDL_GetHintBoolean(SDL_HINT_EMSCRIPTEN_ASYNCIFY, true)) {
         char dialog_background[32];
@@ -232,7 +235,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, 
         // TODO: Handle parent window when multiple windows can be added in Emscripten builds
         char dialog_id[64];
         SDL_snprintf(dialog_id, sizeof(dialog_id), "SDL3_messagebox_%u", SDL_rand_bits());
-        EM_ASM({
+        MAIN_THREAD_EM_ASM({
             var title = UTF8ToString($0);
             var message = UTF8ToString($1);
             var background = UTF8ToString($2);
@@ -263,7 +266,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, 
         for (i = 0; i < messageboxdata->numbuttons; ++i) {
             SDL_MessageBoxButtonData button = messageboxdata->buttons[i];
 
-            const int created = EM_ASM_INT({
+            const int created = MAIN_THREAD_EM_ASM_INT({
                     var dialog_id = UTF8ToString($0);
                     var text = UTF8ToString($1);
                     var responseId = $2;
@@ -328,7 +331,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, 
             // give back control to browser for screen refresh
             emscripten_sleep(0);
 
-            const int dialog_open = EM_ASM_INT({
+            const int dialog_open = MAIN_THREAD_EM_ASM_INT({
                 var dialog_id = UTF8ToString($0);
 
                 var dialog = document.getElementById(dialog_id);
@@ -342,7 +345,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, 
                 continue;
             }
 
-            *buttonID = EM_ASM_INT({
+            *buttonID = MAIN_THREAD_EM_ASM_INT({
                 var dialog_id = UTF8ToString($0);
                 var dialog = document.getElementById(dialog_id);
                 if (!dialog) {
@@ -362,7 +365,7 @@ static bool Emscripten_ShowMessagebox(const SDL_MessageBoxData *messageboxdata, 
 
     } else {
         // Cannot add elements to DOM and block without Asyncify. So, fall back to the alert function.
-        EM_ASM({
+        MAIN_THREAD_EM_ASM({
             alert(UTF8ToString($0) + "\n\n" + UTF8ToString($1));
         }, messageboxdata->title, messageboxdata->message);
     }
