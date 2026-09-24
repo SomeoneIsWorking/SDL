@@ -948,6 +948,10 @@ typedef enum WebGPUQueuedDestroyType
 
 typedef struct WebGPUBindGroupCacheKey
 {
+    // The layout the group is created against. Two pipelines may bind the same
+    // resources through different layouts -- and a vertex group can bind the same
+    // resources as a fragment group -- and a group is only valid with its own.
+    Uint64 layoutID;
     Uint64 boundSamplersIDs[MAX_TEXTURE_SAMPLERS_PER_STAGE];
     Uint64 boundTexturesIDs[MAX_TEXTURE_SAMPLERS_PER_STAGE];
 
@@ -1230,6 +1234,7 @@ typedef struct WebGPUQueuedDestroy
 typedef struct WebGPUShaderBindGroupLayouts
 {
     WGPUBindGroupLayout samplerStorageBindGroupLayout;
+    Uint64 samplerStorageLayoutID; // unique per layout, for the bind group cache key
     WGPUBindGroupLayout uniformBindGroupLayout;
     Uint32 numSamplerStorageEntries; // Hack fix to prevent binding resources to groups with 0 binds
 } WebGPUShaderBindGroupLayouts;
@@ -1238,6 +1243,8 @@ typedef struct WebGPUComputeShaderBindGroupLayouts
 {
     WGPUBindGroupLayout samplerStorageBindGroupLayout;
     WGPUBindGroupLayout readWriteStorageBindGroupLayout;
+    Uint64 samplerStorageLayoutID;   // unique per layout, for the bind group cache key
+    Uint64 readWriteStorageLayoutID;
     WGPUBindGroupLayout uniformBindGroupLayout;
 } WebGPUComputeShaderBindGroupLayouts;
 
@@ -2384,6 +2391,7 @@ static WebGPUShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLayoutsFor
                                                                                        WGPUShaderStage stage)
 {
     WebGPUShaderBindGroupLayouts *result = SDL_calloc(1, sizeof(WebGPUShaderBindGroupLayouts));
+    result->samplerStorageLayoutID = renderer->nextBindableResourceID++;
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
     Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, &entries);
 
@@ -2489,6 +2497,8 @@ static WebGPUComputeShaderBindGroupLayouts *WEBGPU_INTERNAL_GenerateBindGroupLay
                                                                                                      WebGPURenderer *renderer)
 {
     WebGPUComputeShaderBindGroupLayouts *result = SDL_calloc(1, sizeof(WebGPUComputeShaderBindGroupLayouts));
+    result->samplerStorageLayoutID = renderer->nextBindableResourceID++;
+    result->readWriteStorageLayoutID = renderer->nextBindableResourceID++;
     WebGPUInferredBindGroupLayoutEntry *entries = NULL;
     Uint32 numParsedEntries = WEBGPU_INTERNAL_ParseBindGroupLayoutEntriesFromShader(shaderSource, &entries);
 
@@ -2807,6 +2817,7 @@ static WebGPUBindGroupCacheKey WEBGPU_INTERNAL_GenerateKeyForCurrentBinds(WebGPU
     switch (desiredGroup) {
     case WEBGPU_BINDGROUP_VERTEXSAMPLERSTORAGE:
     {
+        result.layoutID = cmdBuf->boundGraphicsPipeline->vertexBindGroupLayouts.samplerStorageLayoutID;
         for (int i = 0; i < MAX_TEXTURE_SAMPLERS_PER_STAGE; i++) {
             result.boundTexturesIDs[i] = cmdBuf->vertexStageBinds.boundTextures[i] ? cmdBuf->vertexStageBinds.boundTextures[i]->identifier : 0;
             result.boundSamplersIDs[i] = cmdBuf->vertexStageBinds.boundSamplers[i] ? cmdBuf->vertexStageBinds.boundSamplers[i]->identifier : 0;
@@ -2828,6 +2839,7 @@ static WebGPUBindGroupCacheKey WEBGPU_INTERNAL_GenerateKeyForCurrentBinds(WebGPU
     }
     case WEBGPU_BINDGROUP_FRAGMENTSAMPLERSTORAGE:
     {
+        result.layoutID = cmdBuf->boundGraphicsPipeline->fragmentBindGroupLayouts.samplerStorageLayoutID;
         for (int i = 0; i < MAX_TEXTURE_SAMPLERS_PER_STAGE; i++) {
             result.boundTexturesIDs[i] = cmdBuf->fragmentStageBinds.boundTextures[i] ? cmdBuf->fragmentStageBinds.boundTextures[i]->identifier : 0;
             result.boundSamplersIDs[i] = cmdBuf->fragmentStageBinds.boundSamplers[i] ? cmdBuf->fragmentStageBinds.boundSamplers[i]->identifier : 0;
@@ -2849,6 +2861,7 @@ static WebGPUBindGroupCacheKey WEBGPU_INTERNAL_GenerateKeyForCurrentBinds(WebGPU
     }
     case WEBGPU_BINDGROUP_COMPUTESAMPLERSTORAGE:
     {
+        result.layoutID = cmdBuf->boundComputePipeline->bindGroupLayouts->samplerStorageLayoutID;
         for (int i = 0; i < MAX_TEXTURE_SAMPLERS_PER_STAGE; i++) {
             result.boundTexturesIDs[i] = cmdBuf->computeStageBinds.boundTextures[i] ? cmdBuf->computeStageBinds.boundTextures[i]->identifier : 0;
             result.boundSamplersIDs[i] = cmdBuf->computeStageBinds.boundSamplers[i] ? cmdBuf->computeStageBinds.boundSamplers[i]->identifier : 0;
@@ -2865,6 +2878,7 @@ static WebGPUBindGroupCacheKey WEBGPU_INTERNAL_GenerateKeyForCurrentBinds(WebGPU
     }
     case WEBGPU_BINDGROUP_COMPUTEREADWRITESTORAGE:
     {
+        result.layoutID = cmdBuf->boundComputePipeline->bindGroupLayouts->readWriteStorageLayoutID;
         for (int i = 0; i < MAX_STORAGE_TEXTURES_PER_STAGE; i++) {
             result.boundReadWriteStorageTexturesIDs[i] = cmdBuf->computeStageBinds.boundReadWriteStorageTextures[i] ? cmdBuf->computeStageBinds.boundReadWriteStorageTextures[i]->identifier : 0;
         }
