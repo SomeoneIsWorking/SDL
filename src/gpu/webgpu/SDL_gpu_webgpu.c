@@ -4387,28 +4387,25 @@ static void *WEBGPU_INTERNAL_MapBufferRange(WebGPURenderer *renderer, WebGPUBuff
 
 static void *WEBGPU_MapTransferBuffer(SDL_GPURenderer *device, SDL_GPUTransferBuffer *transferBuffer, bool cycle)
 {
+    WebGPUBufferContainer *container = (WebGPUBufferContainer *)transferBuffer;
     bool isMainThread = SDL_GetCurrentThreadID() == ((WebGPURenderer *)device)->createdByThreadID;
 
+    if (container->pseudoMappedRange != NULL && isMainThread && !DEV_DISABLE_TRANSFER_BUFFER_PSEUDO_MAPPING) {
+        // Mapped on CPU. An upload from this range is copied out by wgpuQueueWriteBuffer or
+        // wgpuQueueWriteTexture when it is recorded, so no command reads it afterwards: cycling
+        // has nothing to protect, and a cycled buffer's contents are undefined, so it is not
+        // cleared either. Clearing it cost a memset of the whole buffer per cycle.
+        container->mapState = MAP_STATE_MAPPED_CPU;
+        return container->pseudoMappedRange;
+    }
+
     if (cycle) {
-        WEBGPU_INTERNAL_CycleBufferContainer((WebGPURenderer *)device, (WebGPUBufferContainer *)transferBuffer);
+        WEBGPU_INTERNAL_CycleBufferContainer((WebGPURenderer *)device, container);
     }
 
-    if (((WebGPUBufferContainer *)transferBuffer)->pseudoMappedRange != NULL && isMainThread && !DEV_DISABLE_TRANSFER_BUFFER_PSEUDO_MAPPING) {
-        // Time to do our magic tricks.
-        if (cycle) {
-            SDL_memset(((WebGPUBufferContainer *)transferBuffer)->pseudoMappedRange, 0, ((WebGPUBufferContainer *)transferBuffer)->size);
-        }
-
-        // Mapped on CPU.
-        ((WebGPUBufferContainer *)transferBuffer)->mapState = MAP_STATE_MAPPED_CPU;
-
-        return ((WebGPUBufferContainer *)transferBuffer)->pseudoMappedRange;
-    } else {
-        // Mapped on GPU.
-        ((WebGPUBufferContainer *)transferBuffer)->mapState = MAP_STATE_MAPPED_GPU;
-
-        return WEBGPU_INTERNAL_MapBufferRange((WebGPURenderer *)device, (WebGPUBufferContainer *)transferBuffer, 0, -1);
-    }
+    // Mapped on GPU.
+    container->mapState = MAP_STATE_MAPPED_GPU;
+    return WEBGPU_INTERNAL_MapBufferRange((WebGPURenderer *)device, container, 0, -1);
 }
 
 static void WEBGPU_UnmapTransferBuffer(SDL_GPURenderer *device, SDL_GPUTransferBuffer *transferBuffer)
