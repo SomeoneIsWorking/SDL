@@ -2284,7 +2284,7 @@ bool SDL_X11_SetWindowTitle(Display *display, Window xwindow, char *title)
 {
     Atom _NET_WM_NAME = X11_XInternAtom(display, "_NET_WM_NAME", False);
     XTextProperty titleprop;
-    int conv = X11_XmbTextListToTextProperty(display, &title, 1, XTextStyle, &titleprop);
+    int conv = X11_XmbTextListToTextProperty(display, &title, 1, XStdICCTextStyle, &titleprop);
     Status status;
 
     if (X11_XSupportsLocale() != True) {
