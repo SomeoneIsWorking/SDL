@@ -42,6 +42,12 @@ static PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = NULL;
     static PFN_##name name = NULL;
 #include "SDL_gpu_vulkan_vkfuncs.h"
 
+#ifdef SDL_PLATFORM_LINUX
+#include <fcntl.h>
+#include <unistd.h>
+#define HAVE_GPU_VULKAN_DMABUF
+#endif
+
 typedef struct VulkanExtensions
 {
     // These extensions are required!
@@ -598,6 +604,7 @@ struct VulkanTexture
     VulkanMemoryUsedRegion *usedRegion;
 
     VkImage image;
+    VkDeviceMemory importedMemory; // the DMA-BUF it wraps, outside the allocator
     VkImageView fullView; // used for samplers and storage reads
     VkComponentMapping swizzle;
     VkImageAspectFlags aspectFlags;
@@ -1134,6 +1141,8 @@ struct VulkanRenderer
 
     VulkanExtensions supports;
     bool supportsDebugUtils;
+    bool supportsDmabufImport;
+    bool supportsQueueFamilyForeign;
     bool supportsColorspace;
     bool supportsPhysicalDeviceProperties2;
     bool supportsPortabilityEnumeration;
@@ -3167,6 +3176,13 @@ static void VULKAN_INTERNAL_DestroyTexture(
             texture->usedRegion);
     }
 
+    if (texture->importedMemory) {
+        renderer->vkFreeMemory(
+            renderer->logicalDevice,
+            texture->importedMemory,
+            NULL);
+    }
+
     SDL_free(texture);
 }
 
@@ -4860,6 +4876,7 @@ static Uint32 VULKAN_INTERNAL_CreateSwapchain(
 
         // Swapchain memory is managed by the driver
         windowData->textureContainers[i].activeTexture->usedRegion = NULL;
+        windowData->textureContainers[i].activeTexture->importedMemory = VK_NULL_HANDLE;
 
         windowData->textureContainers[i].activeTexture->swizzle = windowData->swapchainSwizzle;
         windowData->textureContainers[i].activeTexture->aspectFlags = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -5736,6 +5753,203 @@ static void VULKAN_PopDebugGroup(
     }
 }
 
+#ifdef HAVE_GPU_VULKAN_DMABUF
+// Creates texture->image over one plane of a DMA-BUF and binds it to the imported memory.
+static bool VULKAN_INTERNAL_ImportDmabufImage(
+    VulkanRenderer *renderer,
+    const SDL_GPUTextureCreateInfo *createinfo,
+    VkImageCreateInfo *imageCreateInfo,
+    VulkanTexture *texture)
+{
+    VkResult vulkanResult;
+    const int fd = (int)SDL_GetNumberProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_FD_NUMBER, -1);
+    const Uint64 modifier = (Uint64)SDL_GetNumberProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_MODIFIER_NUMBER, 0);
+    VkSubresourceLayout plane;
+    VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifierInfo;
+    VkPhysicalDeviceExternalImageFormatInfo externalInfo;
+    VkPhysicalDeviceImageFormatInfo2 formatInfo;
+    VkExternalImageFormatProperties externalProperties;
+    VkImageFormatProperties2 formatProperties;
+    VkExternalMemoryImageCreateInfo externalImageInfo;
+    VkImageDrmFormatModifierExplicitCreateInfoEXT explicitInfo;
+    VkMemoryFdPropertiesKHR fdProperties;
+    VkMemoryRequirements requirements;
+    VkMemoryDedicatedAllocateInfo dedicatedInfo;
+    VkImportMemoryFdInfoKHR importInfo;
+    VkMemoryAllocateInfo allocateInfo;
+    Uint32 memoryTypes;
+    Uint32 memoryTypeIndex = 0;
+    int ownFd;
+
+    if (!renderer->supportsDmabufImport) {
+        SET_STRING_ERROR_AND_RETURN("DMA-BUF import needs Vulkan 1.1 and VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf and VK_EXT_image_drm_format_modifier opted into", false);
+    }
+    if (fd < 0) {
+        SET_STRING_ERROR_AND_RETURN("DMA-BUF import needs a file descriptor", false);
+    }
+    if (createinfo->type != SDL_GPU_TEXTURETYPE_2D || createinfo->num_levels != 1 ||
+        createinfo->layer_count_or_depth != 1 || createinfo->sample_count != SDL_GPU_SAMPLECOUNT_1 ||
+        createinfo->usage != SDL_GPU_TEXTUREUSAGE_SAMPLER) {
+        SET_STRING_ERROR_AND_RETURN("A DMA-BUF texture is 2D with one level, one layer and one sample, and only sampled", false);
+    }
+    if (!SDL_HasProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_PITCH_NUMBER)) {
+        SET_STRING_ERROR_AND_RETURN("DMA-BUF import needs the plane's pitch", false);
+    }
+
+    SDL_zero(plane);
+    plane.offset = (VkDeviceSize)SDL_GetNumberProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_OFFSET_NUMBER, 0);
+    plane.rowPitch = (VkDeviceSize)SDL_GetNumberProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_PITCH_NUMBER, 0);
+
+    imageCreateInfo->tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    imageCreateInfo->usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+    modifierInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT;
+    modifierInfo.pNext = NULL;
+    modifierInfo.drmFormatModifier = modifier;
+    modifierInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    modifierInfo.queueFamilyIndexCount = 0;
+    modifierInfo.pQueueFamilyIndices = NULL;
+    externalInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
+    externalInfo.pNext = &modifierInfo;
+    externalInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    formatInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+    formatInfo.pNext = &externalInfo;
+    formatInfo.format = imageCreateInfo->format;
+    formatInfo.type = imageCreateInfo->imageType;
+    formatInfo.tiling = imageCreateInfo->tiling;
+    formatInfo.usage = imageCreateInfo->usage;
+    formatInfo.flags = imageCreateInfo->flags;
+    SDL_zero(externalProperties);
+    externalProperties.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+    SDL_zero(formatProperties);
+    formatProperties.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+    formatProperties.pNext = &externalProperties;
+    vulkanResult = renderer->vkGetPhysicalDeviceImageFormatProperties2(
+        renderer->physicalDevice,
+        &formatInfo,
+        &formatProperties);
+    if (vulkanResult != VK_SUCCESS ||
+        !(externalProperties.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+        SET_ERROR_AND_RETURN("The driver cannot sample a DMA-BUF of this format with modifier 0x%" SDL_PRIx64, modifier, false);
+    }
+    if (createinfo->width > formatProperties.imageFormatProperties.maxExtent.width ||
+        createinfo->height > formatProperties.imageFormatProperties.maxExtent.height) {
+        SET_STRING_ERROR_AND_RETURN("The DMA-BUF texture is larger than the driver imports", false);
+    }
+
+    externalImageInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    externalImageInfo.pNext = NULL;
+    externalImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    explicitInfo.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+    explicitInfo.pNext = &externalImageInfo;
+    explicitInfo.drmFormatModifier = modifier;
+    explicitInfo.drmFormatModifierPlaneCount = 1;
+    explicitInfo.pPlaneLayouts = &plane;
+    imageCreateInfo->pNext = &explicitInfo;
+
+    vulkanResult = renderer->vkCreateImage(
+        renderer->logicalDevice,
+        imageCreateInfo,
+        NULL,
+        &texture->image);
+    CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkCreateImage, false);
+
+    ownFd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (ownFd < 0) {
+        SET_STRING_ERROR_AND_RETURN("Could not duplicate the DMA-BUF's file descriptor", false);
+    }
+    fdProperties.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+    fdProperties.pNext = NULL;
+    vulkanResult = renderer->vkGetMemoryFdPropertiesKHR(
+        renderer->logicalDevice,
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+        ownFd,
+        &fdProperties);
+    if (vulkanResult != VK_SUCCESS) {
+        close(ownFd);
+        CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkGetMemoryFdPropertiesKHR, false);
+    }
+    renderer->vkGetImageMemoryRequirements(
+        renderer->logicalDevice,
+        texture->image,
+        &requirements);
+    memoryTypes = requirements.memoryTypeBits & fdProperties.memoryTypeBits;
+    if (memoryTypes == 0) {
+        close(ownFd);
+        SET_STRING_ERROR_AND_RETURN("No memory type holds both the image and the DMA-BUF", false);
+    }
+    while (!(memoryTypes & (1u << memoryTypeIndex))) {
+        memoryTypeIndex += 1;
+    }
+
+    dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicatedInfo.pNext = NULL;
+    dedicatedInfo.image = texture->image;
+    dedicatedInfo.buffer = VK_NULL_HANDLE;
+    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+    importInfo.pNext = &dedicatedInfo;
+    importInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    importInfo.fd = ownFd;
+    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocateInfo.pNext = &importInfo;
+    allocateInfo.allocationSize = requirements.size;
+    allocateInfo.memoryTypeIndex = memoryTypeIndex;
+    vulkanResult = renderer->vkAllocateMemory(
+        renderer->logicalDevice,
+        &allocateInfo,
+        NULL,
+        &texture->importedMemory);
+    if (vulkanResult != VK_SUCCESS) {
+        // A successful import owns the descriptor; a failed one leaves it with us.
+        close(ownFd);
+        CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkAllocateMemory, false);
+    }
+
+    vulkanResult = renderer->vkBindImageMemory(
+        renderer->logicalDevice,
+        texture->image,
+        texture->importedMemory,
+        0);
+    CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkBindImageMemory, false);
+    return true;
+}
+
+// Takes a DMA-BUF texture from whatever wrote it, into the sampler layout.
+static void VULKAN_INTERNAL_AcquireDmabufTexture(
+    VulkanRenderer *renderer,
+    VulkanCommandBuffer *commandBuffer,
+    VulkanTexture *texture)
+{
+    VkImageMemoryBarrier memoryBarrier;
+    memoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    memoryBarrier.pNext = NULL;
+    memoryBarrier.srcAccessMask = 0;
+    memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    // The writer left it in a layout of its own; GENERAL keeps its contents.
+    memoryBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    memoryBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    memoryBarrier.srcQueueFamilyIndex = renderer->supportsQueueFamilyForeign ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
+    memoryBarrier.dstQueueFamilyIndex = renderer->queueFamilyIndex;
+    memoryBarrier.image = texture->image;
+    memoryBarrier.subresourceRange.aspectMask = texture->aspectFlags;
+    memoryBarrier.subresourceRange.baseMipLevel = 0;
+    memoryBarrier.subresourceRange.levelCount = 1;
+    memoryBarrier.subresourceRange.baseArrayLayer = 0;
+    memoryBarrier.subresourceRange.layerCount = 1;
+    renderer->vkCmdPipelineBarrier(
+        commandBuffer->commandBuffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        NULL,
+        0,
+        NULL,
+        1,
+        &memoryBarrier);
+}
+#endif
+
 static VulkanTexture *VULKAN_INTERNAL_CreateTexture(
     VulkanRenderer *renderer,
     const SDL_GPUTextureCreateInfo *createinfo)
@@ -5808,33 +6022,43 @@ static VulkanTexture *VULKAN_INTERNAL_CreateTexture(
     imageCreateInfo.pQueueFamilyIndices = NULL;
     imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    vulkanResult = renderer->vkCreateImage(
-        renderer->logicalDevice,
-        &imageCreateInfo,
-        NULL,
-        &texture->image);
-
-    if (vulkanResult != VK_SUCCESS) {
-        VULKAN_INTERNAL_DestroyTexture(renderer, texture);
-        CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkCreateImage, NULL);
-    }
-
-    bindResult = VULKAN_INTERNAL_BindMemoryForImage(
-        renderer,
-        texture->image,
-        &texture->usedRegion);
-
-    if (bindResult != 1) {
-        renderer->vkDestroyImage(
+#ifdef HAVE_GPU_VULKAN_DMABUF
+    if (SDL_HasProperty(createinfo->props, SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_FD_NUMBER)) {
+        if (!VULKAN_INTERNAL_ImportDmabufImage(renderer, createinfo, &imageCreateInfo, texture)) {
+            VULKAN_INTERNAL_DestroyTexture(renderer, texture);
+            return NULL;
+        }
+    } else
+#endif
+    {
+        vulkanResult = renderer->vkCreateImage(
             renderer->logicalDevice,
+            &imageCreateInfo,
+            NULL,
+            &texture->image);
+
+        if (vulkanResult != VK_SUCCESS) {
+            VULKAN_INTERNAL_DestroyTexture(renderer, texture);
+            CHECK_VULKAN_ERROR_AND_RETURN(vulkanResult, vkCreateImage, NULL);
+        }
+
+        bindResult = VULKAN_INTERNAL_BindMemoryForImage(
+            renderer,
             texture->image,
-            NULL);
+            &texture->usedRegion);
 
-        VULKAN_INTERNAL_DestroyTexture(renderer, texture);
-        SET_STRING_ERROR_AND_RETURN("Unable to bind memory for texture!", NULL);
+        if (bindResult != 1) {
+            renderer->vkDestroyImage(
+                renderer->logicalDevice,
+                texture->image,
+                NULL);
+
+            VULKAN_INTERNAL_DestroyTexture(renderer, texture);
+            SET_STRING_ERROR_AND_RETURN("Unable to bind memory for texture!", NULL);
+        }
+
+        texture->usedRegion->vulkanTexture = texture; // lol
     }
-
-    texture->usedRegion->vulkanTexture = texture; // lol
 
     if (createinfo->usage & (SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_GRAPHICS_STORAGE_READ | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ)) {
 
@@ -6952,7 +7176,8 @@ static SDL_GPUTexture *VULKAN_CreateTexture(
         SDL_CopyProperties(createinfo->props, container->header.info.props);
     }
 
-    container->canBeCycled = true;
+    // A wrapped DMA-BUF is one image; cycling would allocate another.
+    container->canBeCycled = texture->importedMemory == VK_NULL_HANDLE;
     container->activeTexture = texture;
     container->textureCapacity = 1;
     container->textureCount = 1;
@@ -6973,11 +7198,18 @@ static SDL_GPUTexture *VULKAN_CreateTexture(
     // is fully initialized before any Submit that could trigger defrag.
     {
         VulkanCommandBuffer *barrierCommandBuffer = (VulkanCommandBuffer *)VULKAN_AcquireCommandBuffer((SDL_GPURenderer *)renderer);
-        VULKAN_INTERNAL_TextureTransitionToDefaultUsage(
-            renderer,
-            barrierCommandBuffer,
-            VULKAN_TEXTURE_USAGE_MODE_UNINITIALIZED,
-            texture);
+#ifdef HAVE_GPU_VULKAN_DMABUF
+        if (texture->importedMemory != VK_NULL_HANDLE) {
+            VULKAN_INTERNAL_AcquireDmabufTexture(renderer, barrierCommandBuffer, texture);
+        } else
+#endif
+        {
+            VULKAN_INTERNAL_TextureTransitionToDefaultUsage(
+                renderer,
+                barrierCommandBuffer,
+                VULKAN_TEXTURE_USAGE_MODE_UNINITIALIZED,
+                texture);
+        }
 
         VULKAN_INTERNAL_TrackTexture(barrierCommandBuffer, texture);
 
@@ -12487,6 +12719,18 @@ static Uint8 VULKAN_INTERNAL_DeterminePhysicalDevice(VulkanRenderer *renderer, V
     return 1;
 }
 
+#ifdef HAVE_GPU_VULKAN_DMABUF
+static bool VULKAN_INTERNAL_OptedIntoDeviceExtension(VulkanFeatures *features, const char *name)
+{
+    for (Uint32 i = 0; i < features->additionalDeviceExtensionCount; i += 1) {
+        if (SDL_strcmp(features->additionalDeviceExtensionNames[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 static Uint8 VULKAN_INTERNAL_CreateLogicalDevice(
     VulkanRenderer *renderer,
     VulkanFeatures *features)
@@ -12657,6 +12901,19 @@ static Uint8 VULKAN_INTERNAL_CreateLogicalDevice(
         renderer->queueFamilyIndex,
         0,
         &renderer->unifiedQueue);
+
+#ifdef HAVE_GPU_VULKAN_DMABUF
+    renderer->supportsDmabufImport =
+        features->usesCustomVulkanOptions &&
+        VK_API_VERSION_MINOR(features->desiredApiVersion) >= 1 &&
+        VK_API_VERSION_MINOR(renderer->physicalDeviceProperties.properties.apiVersion) >= 1 &&
+        renderer->vkGetPhysicalDeviceImageFormatProperties2 != NULL &&
+        VULKAN_INTERNAL_OptedIntoDeviceExtension(features, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+        VULKAN_INTERNAL_OptedIntoDeviceExtension(features, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) &&
+        VULKAN_INTERNAL_OptedIntoDeviceExtension(features, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+    renderer->supportsQueueFamilyForeign =
+        VULKAN_INTERNAL_OptedIntoDeviceExtension(features, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+#endif
 
     return 1;
 }

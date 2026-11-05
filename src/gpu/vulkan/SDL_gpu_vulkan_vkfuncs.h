@@ -53,6 +53,8 @@ VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties)
 
 // Vulkan 1.1 (Needed for opt-in feature checks)
 VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures2)
+// Vulkan 1.1, needed for DMA-BUF import
+VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceImageFormatProperties2)
 
 // VK_KHR_get_physical_device_properties2, needed for KHR_driver_properties
 VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties2KHR)
@@ -163,6 +165,9 @@ VULKAN_DEVICE_FUNCTION(vkResetFences)
 VULKAN_DEVICE_FUNCTION(vkUnmapMemory)
 VULKAN_DEVICE_FUNCTION(vkUpdateDescriptorSets)
 VULKAN_DEVICE_FUNCTION(vkWaitForFences)
+
+// VK_KHR_external_memory_fd, needed for DMA-BUF import
+VULKAN_DEVICE_FUNCTION(vkGetMemoryFdPropertiesKHR)
 
 // VK_KHR_swapchain
 VULKAN_DEVICE_FUNCTION(vkAcquireNextImageKHR)

@@ -2819,6 +2819,30 @@ extern SDL_DECLSPEC SDL_GPUShader * SDLCALL SDL_CreateGPUShader(
  * - `SDL_PROP_GPU_TEXTURE_CREATE_NAME_STRING`: a name that can be displayed
  *   in debugging tools.
  *
+ * With the vulkan driver on Linux, a texture can wrap one plane of an
+ * existing DMA-BUF (a video decoder's picture, another process's image)
+ * instead of allocating memory of its own:
+ *
+ * - `SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_FD_NUMBER`: the DMA-BUF's file
+ *   descriptor. SDL duplicates it, so the caller still owns and closes its
+ *   own. The texture must be 2D with one level, one layer and one sample,
+ *   and SDL_GPU_TEXTUREUSAGE_SAMPLER must be its only usage. The device must
+ *   have been created through SDL_PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER
+ *   with Vulkan 1.1 or later and the device extensions
+ *   VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf and
+ *   VK_EXT_image_drm_format_modifier (and VK_EXT_queue_family_foreign where
+ *   the driver has it); SDL_CreateGPUTexture() fails otherwise, and when the
+ *   driver cannot sample the format with that modifier. SDL acquires the
+ *   image from the foreign queue family as it creates the texture, so whatever
+ *   wrote the pixels must have finished by then, and must not write them again
+ *   until the texture is released and the GPU is done with it.
+ * - `SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_OFFSET_NUMBER`: where the plane
+ *   starts in the DMA-BUF, in bytes. Defaults to zero.
+ * - `SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_PITCH_NUMBER`: the bytes from
+ *   one row of the plane to the next. Required.
+ * - `SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_MODIFIER_NUMBER`: the plane's
+ *   DRM format modifier. Defaults to zero, DRM_FORMAT_MOD_LINEAR.
+ *
  * \param device a GPU Context.
  * \param createinfo a struct describing the state of the texture to create.
  * \returns a texture object on success, or NULL on failure; call
@@ -2850,6 +2874,10 @@ extern SDL_DECLSPEC SDL_GPUTexture * SDLCALL SDL_CreateGPUTexture(
 #define SDL_PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT     "SDL.gpu.texture.create.d3d12.clear.depth"
 #define SDL_PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_STENCIL_NUMBER  "SDL.gpu.texture.create.d3d12.clear.stencil"
 #define SDL_PROP_GPU_TEXTURE_CREATE_NAME_STRING                 "SDL.gpu.texture.create.name"
+#define SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_FD_NUMBER       "SDL.gpu.texture.create.vulkan.dmabuf.fd"
+#define SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_OFFSET_NUMBER   "SDL.gpu.texture.create.vulkan.dmabuf.offset"
+#define SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_PITCH_NUMBER    "SDL.gpu.texture.create.vulkan.dmabuf.pitch"
+#define SDL_PROP_GPU_TEXTURE_CREATE_VULKAN_DMABUF_MODIFIER_NUMBER "SDL.gpu.texture.create.vulkan.dmabuf.modifier"
 
 /**
  * Creates a buffer object to be used in graphics or compute workflows.
