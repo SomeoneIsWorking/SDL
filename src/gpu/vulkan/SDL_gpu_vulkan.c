@@ -720,6 +720,7 @@ typedef struct SwapchainSupportDetails
     Uint32 formatsLength;
     VkPresentModeKHR *presentModes;
     Uint32 presentModesLength;
+    bool surfaceLost;
 } SwapchainSupportDetails;
 
 typedef struct VulkanPresentData
@@ -4506,6 +4507,7 @@ static bool VULKAN_INTERNAL_QuerySwapchainSupport(
     outputDetails->formatsLength = 0;
     outputDetails->presentModes = NULL;
     outputDetails->presentModesLength = 0;
+    outputDetails->surfaceLost = false;
 
     if (!supportsPresent) {
         SET_STRING_ERROR_AND_RETURN("This surface does not support presenting!", false);
@@ -4516,6 +4518,8 @@ static bool VULKAN_INTERNAL_QuerySwapchainSupport(
         physicalDevice,
         surface,
         &outputDetails->capabilities);
+    // Android destroys the window's surface while the app is away
+    outputDetails->surfaceLost = result == VK_ERROR_SURFACE_LOST_KHR;
     CHECK_VULKAN_ERROR_AND_RETURN(result, vkGetPhysicalDeviceSurfaceCapabilitiesKHR, false);
 
     if (!(outputDetails->capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) {
@@ -4665,6 +4669,12 @@ static Uint32 VULKAN_INTERNAL_CreateSwapchain(
             renderer->physicalDevice,
             windowData->surface,
             &swapchainSupportDetails)) {
+        if (swapchainSupportDetails.surfaceLost) {
+            // A new surface is made on the next acquire
+            windowData->needsSurfaceRecreate = true;
+            windowData->needsSwapchainRecreate = true;
+            return VULKAN_INTERNAL_TRY_AGAIN;
+        }
         return false;
     }
 
