@@ -631,6 +631,13 @@ static const ControllerDescription_t arrControllers[] = {
 	{ MAKE_CONTROLLER_ID( 0x28de, 0x1201 ), k_eControllerType_SteamControllerV2, NULL },	// Valve wired Steam Controller (HEADCRAB)
 	{ MAKE_CONTROLLER_ID( 0x28de, 0x1202 ), k_eControllerType_SteamControllerV2, NULL },	// Valve Bluetooth Steam Controller (HEADCRAB)
 	{ MAKE_CONTROLLER_ID( 0x28de, 0x1205 ), k_eControllerType_SteamControllerNeptune, NULL },	// Valve Steam Deck Builtin Controller
+	{ MAKE_CONTROLLER_ID( 0x28de, 0x12f0 ), k_eControllerType_SteamControllerNeptune, NULL },	// InputPlumber Steam Deck protocol (generic handheld)
+	{ MAKE_CONTROLLER_ID( 0x28de, 0x12fa ), k_eControllerType_SteamControllerNeptune, NULL },	// InputPlumber Steam Deck protocol (MSI Claw)
+	{ MAKE_CONTROLLER_ID( 0x28de, 0x12fb ), k_eControllerType_SteamControllerNeptune, NULL },	// InputPlumber Steam Deck protocol (Lenovo Legion Go 2)
+	{ MAKE_CONTROLLER_ID( 0x28de, 0x12fc ), k_eControllerType_SteamControllerNeptune, NULL },	// InputPlumber Steam Deck protocol (Zotac Zone)
+	{ MAKE_CONTROLLER_ID( 0x28de, 0x12fd ), k_eControllerType_SteamControllerNeptune, NULL },	// InputPlumber Steam Deck protocol (ASUS ROG Ally)
+	{ MAKE_CONTROLLER_ID( 0x28de, 0x12fe ), k_eControllerType_SteamControllerNeptune, NULL },	// InputPlumber Steam Deck protocol (Lenovo Legion Go)
+	{ MAKE_CONTROLLER_ID( 0x28de, 0x12ff ), k_eControllerType_SteamControllerNeptune, NULL },	// InputPlumber Steam Deck protocol (Lenovo Legion Go S)
 	{ MAKE_CONTROLLER_ID( 0x28de, 0x1302 ), k_eControllerType_SteamControllerTriton, NULL },	// Valve Steam Triton Controller
 	{ MAKE_CONTROLLER_ID( 0x28de, 0x1303 ), k_eControllerType_SteamControllerTriton, NULL },	// Valve Steam Triton Controller (BLE)
 	{ MAKE_CONTROLLER_ID( 0x28de, 0x1304 ), k_eControllerType_SteamControllerTriton, NULL },	// Valve Steam Proteus Dongle (Proprietary)
